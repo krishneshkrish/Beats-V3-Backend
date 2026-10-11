@@ -1,0 +1,21 @@
+name: Render Backend Keep-Alive
+
+on:
+  schedule:
+    # Runs every 10 minutes to prevent Render from sleeping (Render sleeps after 15 minutes of inactivity)
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Backend Endpoint
+        run: |
+          URL="${{ secrets.BACKEND_URL }}"
+          if [ -z "$URL" ]; then
+            URL="https://beats-api.onrender.com"
+          fi
+          echo "Pinging ${URL}/health..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 45 "${URL}/health" || echo "000")
+          echo "Ping response status: ${STATUS}"
