@@ -13,7 +13,7 @@ import urllib.request
 import urllib.error
 import json
 
-DEFAULT_URL = "https://beats-api.onrender.com"
+DEFAULT_URL = "https://beats-v3-backend.onrender.com"
 DEFAULT_INTERVAL_SEC = 300  # 5 minutes
 
 ENDPOINTS = [
