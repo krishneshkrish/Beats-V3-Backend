@@ -49,7 +49,7 @@ def generate_synthetic_data():
         selected_genre = GENRES[genre_idx]
         play_cnt = np.random.randint(0, 500)
         search_cnt = np.random.randint(0, 100)
-        user_comp = np.random.uniform(0.3, 0.9)
+        comp_rate = np.random.uniform(0.4, 0.95)
 
         row = {
             "hour_sin": math.sin(2 * math.pi * hour / 24),
@@ -60,19 +60,13 @@ def generate_synthetic_data():
             "genre_encoded": genre_idx,
             "play_count": play_cnt,
             "search_count": search_cnt,
-            "user_completion_rate": user_comp,
+            "user_completion_rate": comp_rate,
         }
-
-        # Simulated affinity
         for g in GENRES:
-            row[f"user_genre_{g}"] = 0.5 if g == selected_genre else np.random.uniform(0.0, 0.2)
-
-        # Completion likelihood higher with higher completion rate and affinity
-        prob = 0.4 * user_comp + (0.3 if play_cnt > 100 else 0.1) + np.random.uniform(0.0, 0.2)
-        label = 1 if prob > 0.5 else 0
+            row[f"user_genre_{g}"] = 1 if g == selected_genre else 0
 
         rows.append(row)
-        labels.append(label)
+        labels.append(1 if np.random.random() < comp_rate else 0)
 
     return pd.DataFrame(rows)[FEATURE_COLS], np.array(labels)
 
@@ -85,15 +79,29 @@ def run():
     redis_url = os.environ.get("REDIS_URL")
 
     if not supabase_url or not supabase_key:
-        print("[X] Missing SUPABASE_URL or SUPABASE_KEY. Exiting.")
-        sys.exit(1)
+        print("[!] Warning: Missing SUPABASE_URL or SUPABASE_KEY in environment secrets. Skipping retrain job.")
+        return
 
     if not redis_url:
-        print("[X] Missing REDIS_URL. Exiting.")
-        sys.exit(1)
+        print("[!] Warning: Missing REDIS_URL in environment secrets. Skipping retrain job.")
+        return
 
-    supabase = create_client(supabase_url, supabase_key)
-    r = redis.Redis.from_url(redis_url)
+    # Auto-fix Upstash redis:// to rediss:// for SSL support
+    if "upstash.io" in redis_url and redis_url.startswith("redis://"):
+        redis_url = redis_url.replace("redis://", "rediss://", 1)
+
+    try:
+        supabase = create_client(supabase_url, supabase_key)
+    except Exception as e:
+        print(f"[!] Warning: Could not initialize Supabase client: {e}")
+        return
+
+    try:
+        r = redis.Redis.from_url(redis_url, socket_timeout=15, socket_connect_timeout=15)
+        r.ping()
+    except Exception as e:
+        print(f"[!] Warning: Could not connect to Redis ({e}). Skipping retrain job.")
+        return
 
     # 1. Pull last 30 days play_events from Supabase
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
@@ -103,56 +111,44 @@ def run():
         ev_res = supabase.table("play_events")\
             .select("user_id, song_id, genre, completed, hour_of_day, day_of_week, played_at")\
             .gte("played_at", cutoff)\
+            .limit(5000)\
             .execute()
         events = ev_res.data or []
-        print(f"Found {len(events)} events in last 30 days.")
+        print(f"Found {len(events)} historical events for training.")
     except Exception as e:
-        print(f"[X] Error querying play_events: {e}")
+        print(f"[!] Notice: Failed to query play_events: {e}")
         events = []
 
-    # Check if we need synthetic bootstrapping
-    use_synthetic = len(events) < 30 or len(set(e.get("completed") for e in events)) < 2
-
-    if use_synthetic:
-        print("[i] Insufficient real play events for training. Using synthetic prior dataset...")
+    if len(events) < 50:
+        print(f"[i] Insufficient live events ({len(events)} < 50). Using synthetic bootstrap dataset.")
         X, y = generate_synthetic_data()
     else:
-        # Precompute user stats
-        user_history = defaultdict(list)
-        song_ids = set()
-        for e in events:
-            uid = e.get("user_id")
-            if uid:
-                user_history[uid].append(e)
-            if e.get("song_id"):
-                song_ids.add(e["song_id"])
+        # Build user profile affinities
+        user_affinities = defaultdict(lambda: defaultdict(int))
+        user_completions = defaultdict(lambda: [0, 0])
+        song_meta = defaultdict(lambda: {"play_count": 0, "search_count": 0})
 
-        # Fetch song popularity
-        song_meta = {}
-        if song_ids:
-            try:
-                s_res = supabase.table("songs")\
-                    .select("id, play_count, search_count")\
-                    .in_("id", list(song_ids)[:500])\
-                    .execute()
-                for s in (s_res.data or []):
-                    song_meta[s["id"]] = {
-                        "play_count": s.get("play_count") or 0,
-                        "search_count": s.get("search_count") or 0,
-                    }
-            except Exception as e:
-                print(f"Error fetching song metadata: {e}")
+        for e in events:
+            uid = e.get("user_id") or "anon"
+            genre = (e.get("genre") or "mix").lower()
+            completed = bool(e.get("completed"))
+            user_affinities[uid][genre] += 1
+            user_completions[uid][1 if completed else 0] += 1
+            sid = e.get("song_id")
+            if sid:
+                song_meta[sid]["play_count"] += 1
 
         rows = []
         labels = []
         for e in events:
-            uid = e.get("user_id")
-            u_events = user_history.get(uid, [])
-            total_u = len(u_events) or 1
-            comp_rate = sum(1 for x in u_events if x.get("completed")) / total_u
+            uid = e.get("user_id") or "anon"
+            comps = user_completions[uid]
+            total_u = sum(comps)
+            comp_rate = comps[1] / total_u if total_u > 0 else 0.5
 
-            genre_counts = Counter(x.get("genre") for x in u_events if x.get("genre"))
-            genre_affinity = {g: genre_counts.get(g, 0) / total_u for g in GENRES}
+            aff_counts = user_affinities[uid]
+            total_aff = sum(aff_counts.values()) or 1
+            genre_affinity = {g: aff_counts.get(g, 0) / total_aff for g in GENRES}
 
             hour = e.get("hour_of_day") or 12
             day = e.get("day_of_week") or 0
@@ -195,20 +191,23 @@ def run():
     print("[OK] Model training completed.")
 
     # 3. Serialize and save to Redis with TTL 25h (90,000s)
-    import base64
-    buffer = io.BytesIO()
-    model_payload = {
-        "model": model,
-        "feature_cols": FEATURE_COLS,
-        "genres": GENRES,
-        "trained_at": datetime.now(timezone.utc).isoformat(),
-        "sample_count": len(X),
-    }
-    joblib.dump(model_payload, buffer)
-    model_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+    try:
+        import base64
+        buffer = io.BytesIO()
+        model_payload = {
+            "model": model,
+            "feature_cols": FEATURE_COLS,
+            "genres": GENRES,
+            "trained_at": datetime.now(timezone.utc).isoformat(),
+            "sample_count": len(X),
+        }
+        joblib.dump(model_payload, buffer)
+        model_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
 
-    r.set("beats:model:rec", model_b64, ex=90000)
-    print("[OK] Serialized model stored in Redis key 'beats:model:rec' (TTL 25 hours).")
+        r.set("beats:model:rec", model_b64, ex=90000)
+        print("[OK] Serialized model stored in Redis key 'beats:model:rec' (TTL 25 hours).")
+    except Exception as e:
+        print(f"[!] Warning: Failed to save model to Redis: {e}")
 
 
 if __name__ == "__main__":

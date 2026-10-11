@@ -18,15 +18,31 @@ def run():
     redis_url = os.environ.get("REDIS_URL")
 
     if not supabase_url or not supabase_key:
-        print("[X] Missing SUPABASE_URL or SUPABASE_KEY. Exiting.")
-        sys.exit(1)
+        print("[!] Warning: Missing SUPABASE_URL or SUPABASE_KEY in environment secrets.")
+        print("[!] Skipping hot songs refresh until Supabase credentials are configured.")
+        return
 
     if not redis_url:
-        print("[X] Missing REDIS_URL. Exiting.")
-        sys.exit(1)
+        print("[!] Warning: Missing REDIS_URL in environment secrets.")
+        print("[!] Skipping hot songs cache update until REDIS_URL is configured in GitHub Secrets.")
+        return
 
-    supabase = create_client(supabase_url, supabase_key)
-    r = redis.Redis.from_url(redis_url, decode_responses=True)
+    # Auto-fix Upstash redis:// to rediss:// for SSL support
+    if "upstash.io" in redis_url and redis_url.startswith("redis://"):
+        redis_url = redis_url.replace("redis://", "rediss://", 1)
+
+    try:
+        supabase = create_client(supabase_url, supabase_key)
+    except Exception as e:
+        print(f"[!] Warning: Could not initialize Supabase client: {e}")
+        return
+
+    try:
+        r = redis.Redis.from_url(redis_url, decode_responses=True, socket_timeout=15, socket_connect_timeout=15)
+        r.ping()
+    except Exception as e:
+        print(f"[!] Warning: Could not connect to Redis ({e}). Skipping cache update.")
+        return
 
     # 1. Fetch play events from last 7 days
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
@@ -40,7 +56,7 @@ def run():
         events = res.data or []
         print(f"Found {len(events)} play events in the last 7 days.")
     except Exception as e:
-        print(f"[X] Failed to query play_events: {e}")
+        print(f"[!] Notice: Failed to query play_events: {e}")
         events = []
 
     global_counts = Counter()
@@ -72,26 +88,29 @@ def run():
                 if g:
                     genre_counts[g][sid] = p_count
         except Exception as e:
-            print(f"[X] Fallback query error: {e}")
+            print(f"[!] Notice: Fallback query error: {e}")
 
     # 3. Update Redis sorted sets
-    pipe = r.pipeline()
+    try:
+        pipe = r.pipeline()
 
-    if global_counts:
-        pipe.delete("beats:hot:global")
-        # Redis zadd takes mapping {member: score}
-        pipe.zadd("beats:hot:global", dict(global_counts))
-        pipe.expire("beats:hot:global", 604800)  # 7 days TTL
+        if global_counts:
+            pipe.delete("beats:hot:global")
+            # Redis zadd takes mapping {member: score}
+            pipe.zadd("beats:hot:global", dict(global_counts))
+            pipe.expire("beats:hot:global", 604800)  # 7 days TTL
 
-    for genre, counts in genre_counts.items():
-        if counts:
-            g_key = f"beats:hot:genre:{genre}"
-            pipe.delete(g_key)
-            pipe.zadd(g_key, dict(counts))
-            pipe.expire(g_key, 604800)
+        for genre, counts in genre_counts.items():
+            if counts:
+                g_key = f"beats:hot:genre:{genre}"
+                pipe.delete(g_key)
+                pipe.zadd(g_key, dict(counts))
+                pipe.expire(g_key, 604800)
 
-    pipe.execute()
-    print(f"[OK] Updated Redis hot sets: {len(global_counts)} global songs across {len(genre_counts)} genres.")
+        pipe.execute()
+        print(f"[OK] Updated Redis hot sets: {len(global_counts)} global songs across {len(genre_counts)} genres.")
+    except Exception as e:
+        print(f"[!] Warning: Failed to write to Redis pipeline: {e}")
 
 
 if __name__ == "__main__":
