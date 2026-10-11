@@ -829,8 +829,9 @@ async def search_songs(
         except Exception as e:
             print(f"Fuzzy matching error: {e}")
 
-    # 6. Dynamic on-the-fly search fetch if local catalog has limited results (< 3)
-    if len(songs_data) < 3:
+    # 6. Dynamic on-the-fly search fetch if local catalog has limited results (< 3) OR lacks title match
+    has_title_match = any(clean_q in (s.get("title") or "").lower() for s in songs_data)
+    if len(songs_data) < 3 or not has_title_match:
         try:
             dynamic_songs = await fetch_dynamic_search_songs(clean_q, client, limit=limit)
             for s in dynamic_songs:
@@ -839,6 +840,35 @@ async def search_songs(
                     songs_data.append(s)
         except Exception as e:
             print(f"Dynamic fetch error in search: {e}")
+
+    # 7. Relevance-first ranking: Exact title -> Title prefix -> Title substring -> Artist -> Film -> Popularity
+    def compute_relevance(song: dict):
+        title = (song.get("title") or "").strip().lower()
+        film = (song.get("film") or "").strip().lower()
+        artist = (song.get("artist") or "").strip().lower()
+        p_count = song.get("play_count") or 0
+
+        score = 0
+        if title == clean_q:
+            score = 1000
+        elif title.startswith(clean_q):
+            score = 900
+        elif clean_q in title:
+            score = 800
+        elif artist == clean_q or artist.startswith(clean_q):
+            score = 700
+        elif clean_q in artist:
+            score = 600
+        elif film == clean_q or film.startswith(clean_q):
+            score = 500
+        elif clean_q in film:
+            score = 400
+        else:
+            score = 100
+
+        return (score, p_count)
+
+    songs_data.sort(key=compute_relevance, reverse=True)
 
     result = {
         "songs": songs_data[:limit],
