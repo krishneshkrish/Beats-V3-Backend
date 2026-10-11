@@ -1,0 +1,29 @@
+name: Generate Taste Profiles
+
+on:
+  schedule:
+    - cron: '30 21 * * 0'  # 3:00 AM IST Sunday (21:30 UTC Sunday)
+  workflow_dispatch:
+
+jobs:
+  taste_profile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Taste Profile Job
+        run: python jobs/taste_profile.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
