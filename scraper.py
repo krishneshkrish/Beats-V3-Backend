@@ -492,7 +492,13 @@ async def async_crawl_genre(
     base_url = cfg["base_url"]
     listing_paths = cfg.get("listing_paths", ["/tamil-songs?page={page}"])
     proxy_url = proxy or os.environ.get("SCRAPER_PROXY")
-    proxies = {"http://": proxy_url, "https://": proxy_url} if proxy_url else None
+    client_kwargs = {
+        "headers": STREAM_HEADERS,
+        "timeout": 15.0,
+        "follow_redirects": True
+    }
+    if proxy_url:
+        client_kwargs["proxy"] = proxy_url
 
     print(f"\n[Fast Async Crawler] Genre: {genre.upper()} | Base: {base_url} | Pages: {pages}")
 
@@ -500,7 +506,7 @@ async def async_crawl_genre(
     total_songs = 0
     buffer: List[Dict[str, Any]] = []
 
-    async with httpx.AsyncClient(headers=STREAM_HEADERS, proxies=proxies, timeout=15.0) as client:
+    async with httpx.AsyncClient(**client_kwargs) as client:
         # Collect URLs across all listing paths (including singles)
         all_detail_urls = []
         for path in listing_paths:
