@@ -692,7 +692,23 @@ async def search_songs(
     songs_data = []
     seen_ids = set()
 
-    # 3. Fast database OR query matching all variants
+    # 2.5 Ensure direct title matches are fetched first so they are never crowded out
+    try:
+        title_res = client.table("songs")\
+            .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
+            .eq("status", "available")\
+            .ilike("title", f"%{clean_q}%")\
+            .order("play_count", desc=True)\
+            .limit(50)\
+            .execute()
+        for s in (title_res.data or []):
+            if s["id"] not in seen_ids:
+                seen_ids.add(s["id"])
+                songs_data.append(s)
+    except Exception as e:
+        print(f"Title pre-search notice: {e}")
+
+    # 3. Fast database OR query matching all variants with expanded candidate pool
     or_clauses = []
     for v in variants[:4]:
         or_clauses.extend([
@@ -702,6 +718,7 @@ async def search_songs(
             f"genre.ilike.%{v}%",
         ])
     or_filter = ",".join(or_clauses)
+    candidate_limit = max(limit * 3, 50)
 
     try:
         res = client.table("songs")\
@@ -712,7 +729,7 @@ async def search_songs(
             .eq("status", "available")\
             .or_(or_filter)\
             .order("play_count", desc=True)\
-            .limit(limit)\
+            .limit(candidate_limit)\
             .execute()
         for s in (res.data or []):
             if s["id"] not in seen_ids:
@@ -720,19 +737,6 @@ async def search_songs(
                 songs_data.append(s)
     except Exception as e:
         print(f"Search query error: {e}")
-        try:
-            res = client.table("songs")\
-                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
-                .eq("status", "available")\
-                .ilike("title", f"%{clean_q}%")\
-                .limit(limit)\
-                .execute()
-            for s in (res.data or []):
-                if s["id"] not in seen_ids:
-                    seen_ids.add(s["id"])
-                    songs_data.append(s)
-        except Exception as e2:
-            print(f"Search fallback query error: {e2}")
 
     # 4. Multi-word & movie/genre matching
     words = [w for w in clean_q.split() if len(w) >= 2]
@@ -848,12 +852,15 @@ async def search_songs(
         artist = (song.get("artist") or "").strip().lower()
         p_count = song.get("play_count") or 0
 
+        clean_t = re.sub(r'[,()"\-:]', '', title).strip()
+        clean_search = re.sub(r'[,()"\-:]', '', clean_q).strip()
+
         score = 0
-        if title == clean_q:
+        if title == clean_q or clean_t == clean_search:
             score = 1000
-        elif title.startswith(clean_q):
+        elif title.startswith(clean_q) or clean_t.startswith(clean_search):
             score = 900
-        elif clean_q in title:
+        elif clean_q in title or clean_search in clean_t:
             score = 800
         elif artist == clean_q or artist.startswith(clean_q):
             score = 700
