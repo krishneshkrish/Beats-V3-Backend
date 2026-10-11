@@ -16,14 +16,14 @@ def generate_taste_summary(groq_client: Groq, top_genres: list, top_artists: lis
     artist_str = ", ".join(top_artists)
 
     prompt = f"""You are an insightful music psychologist creating a retro boombox music profile.
-Based on this listener\'s weekly listening activity:
+Based on this listener's weekly listening activity:
 - Total tracks played: {total_plays}
 - Top genres breakdown: {genre_str}
 - Top artists: {artist_str}
 
 Craft a punchy, ultra-cool, 1-to-2 sentence listening aesthetic summary (maximum 25 words).
 Direct tone, vibrant vintage music slang, no quotation marks.
-Example: "High-voltage Tamil bass explorer with an appetite for synthwave night drives and melancholic Malayalam melodies."
+Example: High-voltage Tamil bass explorer with an appetite for synthwave night drives and melancholic Malayalam melodies.
 """
     try:
         completion = groq_client.chat.completions.create(
@@ -32,7 +32,7 @@ Example: "High-voltage Tamil bass explorer with an appetite for synthwave night 
             temperature=0.7,
             max_tokens=60,
         )
-        return completion.choices[0].message.content.strip().strip(\'"\')
+        return completion.choices[0].message.content.strip().strip('"').strip("'")
     except Exception as e:
         print(f"[!] Warning: Groq LLM generation error: {e}")
         # Deterministic rich fallback
@@ -78,7 +78,7 @@ def run():
     updated_count = 0
     for u in eligible_users:
         uid = u["id"]
-        # Fetch user\'s play history
+        # Fetch user's play history
         try:
             ev_res = supabase.table("play_events")\
                 .select("genre, song_id")\
@@ -108,7 +108,7 @@ def run():
             top_artists = [a for a, _ in artist_counts.most_common(3)]
 
             summary = generate_taste_summary(groq_client, top_genres, top_artists, len(events))
-            print(f"  User {uid[:8]} ({u.get(\'name\')}): \"{summary}\"")
+            print(f"  User {uid[:8]} ({u.get('name')}): \"{summary}\"")
 
             # Update Supabase user record
             supabase.table("users")\
