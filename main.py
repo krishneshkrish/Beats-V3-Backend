@@ -206,7 +206,7 @@ class UserCreate(BaseModel):
 
 
 # ─── 1. HEALTH CHECK ───
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {
         "status": "ok",
@@ -214,6 +214,16 @@ async def health():
         "version": "2.0.0",
         "timestamp": datetime.now(IST).isoformat(),
     }
+
+
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root():
+    return {
+        "status": "ok",
+        "service": "beats-api",
+        "message": "Beats Backend is running",
+    }
+
 
 
 from urllib.parse import urlparse, urljoin
