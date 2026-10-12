@@ -287,7 +287,12 @@ async def ml_recs(
 
     try:
         import base64
-        if isinstance(model_bytes, str):
+        if isinstance(model_bytes, bytes):
+            try:
+                raw_bytes = base64.b64decode(model_bytes)
+            except Exception:
+                raw_bytes = model_bytes
+        elif isinstance(model_bytes, str):
             try:
                 raw_bytes = base64.b64decode(model_bytes)
             except Exception:
@@ -306,25 +311,33 @@ async def ml_recs(
     if not model:
         return []
 
-    # 2. Get candidate songs from Supabase
-    candidates = supabase.table("songs")\
-        .select("id, genre, play_count, search_count")\
-        .eq("status", "available")\
-        .order("play_count", desc=True)\
-        .limit(200)\
-        .execute()
-
-    if not candidates.data:
-        return []
-
-    # 3. User listening history
+    # 2. Mine user listening history & preferences
     history = supabase.table("play_events")\
-        .select("genre, completed")\
+        .select("song_id, genre, completed")\
         .eq("user_id", user_id)\
+        .order("played_at", desc=True)\
         .limit(100)\
         .execute()
+    events = history.data or []
 
-    genre_counts = Counter(e["genre"] for e in (history.data or []) if e.get("genre"))
+    # Anti-fatigue filtering (songs finished recently)
+    recent_played_ids = {e["song_id"] for e in events[:15] if e.get("song_id")}
+
+    # Mine favorite artists from history
+    favorite_artists = set()
+    history_song_ids = [e["song_id"] for e in events if e.get("song_id")][:50]
+    if history_song_ids:
+        try:
+            artist_res = supabase.table("songs").select("artist").in_("id", history_song_ids).execute()
+            for row in (artist_res.data or []):
+                a = (row.get("artist") or "").split(",")[0].strip()
+                if len(a) >= 3:
+                    favorite_artists.add(a.lower())
+        except Exception:
+            pass
+
+    genre_counts = Counter(e["genre"] for e in events if e.get("genre"))
+    top_user_genres = [g for g, _ in genre_counts.most_common(3)]
     total_genres = sum(genre_counts.values()) or 1
     genre_affinity = {
         g: genre_counts.get(g, 0) / total_genres
@@ -332,15 +345,68 @@ async def ml_recs(
     }
 
     completion_rate = sum(
-        1 for e in (history.data or []) if e.get("completed")
-    ) / max(len(history.data or []), 1)
+        1 for e in events if e.get("completed")
+    ) / max(len(events), 1)
+
+    # 3. Dynamic multi-tier candidate pool: favorite artists + top genres + global trending
+    candidates_dict = {}
+
+    # Tier 1: Songs from user's favorite artists
+    for artist_name in list(favorite_artists)[:6]:
+        try:
+            a_songs = supabase.table("songs")\
+                .select("id, title, artist, genre, play_count, search_count")\
+                .eq("status", "available")\
+                .ilike("artist", f"%{artist_name}%")\
+                .order("play_count", desc=True)\
+                .limit(15)\
+                .execute()
+            for s in (a_songs.data or []):
+                if s["id"] not in recent_played_ids and s["id"] not in candidates_dict:
+                    candidates_dict[s["id"]] = s
+        except Exception:
+            pass
+
+    # Tier 2: Top songs from user's preferred genres
+    for g in top_user_genres:
+        try:
+            g_songs = supabase.table("songs")\
+                .select("id, title, artist, genre, play_count, search_count")\
+                .eq("status", "available")\
+                .eq("genre", g)\
+                .order("play_count", desc=True)\
+                .limit(30)\
+                .execute()
+            for s in (g_songs.data or []):
+                if s["id"] not in recent_played_ids and s["id"] not in candidates_dict:
+                    candidates_dict[s["id"]] = s
+        except Exception:
+            pass
+
+    # Tier 3: Global popular discovery backfill
+    try:
+        all_pop = supabase.table("songs")\
+            .select("id, title, artist, genre, play_count, search_count")\
+            .eq("status", "available")\
+            .order("play_count", desc=True)\
+            .limit(80)\
+            .execute()
+        for s in (all_pop.data or []):
+            if s["id"] not in recent_played_ids and s["id"] not in candidates_dict:
+                candidates_dict[s["id"]] = s
+    except Exception:
+        pass
+
+    candidates_list = list(candidates_dict.values())
+    if not candidates_list:
+        return []
 
     # 4. Build feature matrix
     hour = now.hour
     day = now.weekday()
     rows = []
 
-    for song in candidates.data:
+    for song in candidates_list:
         song_genre = song.get("genre", "")
         genre_idx = genres.index(song_genre) if song_genre in genres else len(genres) - 1
 
@@ -367,10 +433,18 @@ async def ml_recs(
             X[col] = 0
     X = X[feature_cols].fillna(0)
 
-    # 5. Predict probabilities and rank candidates
-    scores = model.predict_proba(X)[:, 1]
-    top_idx = np.argsort(scores)[::-1][:limit]
-    top_ids = [candidates.data[i]["id"] for i in top_idx]
+    # 5. Predict probabilities + apply artist affinity boost
+    base_scores = model.predict_proba(X)[:, 1]
+    final_scores = []
+    for idx, song in enumerate(candidates_list):
+        score = float(base_scores[idx])
+        s_artist = (song.get("artist") or "").lower()
+        if any(fa in s_artist for fa in favorite_artists):
+            score += 0.35
+        final_scores.append(score)
+
+    top_idx = np.argsort(final_scores)[::-1][:limit]
+    top_ids = [candidates_list[i]["id"] for i in top_idx]
 
     # 6. Fetch full song details and preserve rank ordering
     res = supabase.table("songs")\
@@ -379,7 +453,7 @@ async def ml_recs(
         .execute()
 
     if not res.data:
-        return []
+        return [candidates_list[i] for i in top_idx]
 
     id_map = {s["id"]: s for s in res.data}
     ordered_songs = [id_map[sid] for sid in top_ids if sid in id_map]

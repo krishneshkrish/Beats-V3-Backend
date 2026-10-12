@@ -212,6 +212,7 @@ async def health():
         "status": "ok",
         "service": "beats-api",
         "version": "2.0.0",
+        
         "timestamp": datetime.now(IST).isoformat(),
     }
 
@@ -1078,8 +1079,26 @@ async def get_recommendations(
     from recommender import get_time_block
     time_block = get_time_block(now.hour)
 
+    # 0. Resolve user_id: match by ID or display name
+    actual_user_id = user_id
+    user_res = client.table("users")\
+        .select("id, play_count")\
+        .eq("id", user_id)\
+        .execute()
+
+    if not user_res.data:
+        name_res = client.table("users")\
+            .select("id, play_count")\
+            .ilike("name", user_id)\
+            .order("play_count", desc=True)\
+            .limit(1)\
+            .execute()
+        if name_res.data:
+            actual_user_id = name_res.data[0]["id"]
+            user_res = name_res
+
     # Cache check (per user per time block & hour)
-    cache_key = f"beats:recs:{user_id}:{time_block['key']}:{now.hour}"
+    cache_key = f"beats:recs:{actual_user_id}:{time_block['key']}:{now.hour}"
     if r:
         try:
             cached = await r.get(cache_key)
@@ -1089,12 +1108,6 @@ async def get_recommendations(
                 return data
         except Exception:
             pass
-
-    # Get user play count
-    user_res = client.table("users")\
-        .select("play_count")\
-        .eq("id", user_id)\
-        .execute()
 
     play_count = 0
     if user_res.data:
@@ -1106,15 +1119,15 @@ async def get_recommendations(
     if play_count >= 50 and r:
         try:
             from recommender import ml_recs
-            songs = await ml_recs(user_id, limit, client, r)
+            songs = await ml_recs(actual_user_id, limit, client, r)
             if songs:
                 strategy = "ml"
         except Exception as ml_err:
-            print(f"ML recs notice for {user_id}: {ml_err}")
+            print(f"ML recs notice for {actual_user_id}: {ml_err}")
 
     if not songs:
         from recommender import rule_based_recs
-        songs = await rule_based_recs(user_id, limit, client, r, now)
+        songs = await rule_based_recs(actual_user_id, limit, client, r, now)
         strategy = "rule_based"
 
     result = {
