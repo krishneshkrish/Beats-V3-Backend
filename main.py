@@ -752,7 +752,7 @@ async def search_songs(
     for dq in direct_queries:
         try:
             title_res = client.table("songs")\
-                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
+                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status, source_url")\
                 .eq("status", "available")\
                 .ilike("title", f"%{dq}%")\
                 .order("play_count", desc=True)\
@@ -770,7 +770,7 @@ async def search_songs(
     for fq in film_terms:
         try:
             film_res = client.table("songs")\
-                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
+                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status, source_url")\
                 .eq("status", "available")\
                 .ilike("film", f"%{fq}%")\
                 .order("play_count", desc=True)\
@@ -785,7 +785,7 @@ async def search_songs(
 
         try:
             from_res = client.table("songs")\
-                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
+                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status, source_url")\
                 .eq("status", "available")\
                 .ilike("title", f"%from %{fq}%")\
                 .order("play_count", desc=True)\
@@ -814,7 +814,7 @@ async def search_songs(
         res = client.table("songs")\
             .select(
                 "id, title, artist, film, genre, "
-                "duration, thumbnail_url, play_count, status"
+                "duration, thumbnail_url, play_count, status, source_url"
             )\
             .eq("status", "available")\
             .or_(or_filter)\
@@ -1520,7 +1520,7 @@ async def get_trending(
         top_recent_ids = [sid for sid, _ in recent_counts.most_common(limit)]
         try:
             s_res = client.table("songs")\
-                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count")\
+                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status, source_url")\
                 .in_("id", top_recent_ids)\
                 .eq("status", "available")\
                 .execute()
@@ -1538,7 +1538,7 @@ async def get_trending(
         try:
             if clean_genre:
                 cat_res = client.table("songs")\
-                    .select("id, title, artist, film, genre, duration, thumbnail_url, play_count")\
+                    .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status, source_url")\
                     .eq("status", "available")\
                     .eq("genre", clean_genre)\
                     .order("play_count", desc=True)\
@@ -1559,7 +1559,7 @@ async def get_trending(
                 genres = ["tamil", "malayalam", "hindi", "english", "phonk", "mix"]
                 for g in genres:
                     g_res = client.table("songs")\
-                        .select("id, title, artist, film, genre, duration, thumbnail_url, play_count")\
+                        .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status, source_url")\
                         .eq("status", "available")\
                         .eq("genre", g)\
                         .order("play_count", desc=True)\
