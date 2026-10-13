@@ -134,8 +134,9 @@ async def lifespan(app: FastAPI):
                 redis_url,
                 encoding="utf-8",
                 decode_responses=True,
-                socket_connect_timeout=5,
-                socket_timeout=5,
+                socket_connect_timeout=8,
+                socket_timeout=8,
+                retry_on_timeout=True,
             )
             print("[OK] Redis connected")
         except Exception as e:

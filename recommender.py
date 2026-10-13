@@ -292,7 +292,12 @@ async def ml_recs(
     if not redis:
         return []
 
-    model_bytes = await redis.get("beats:model:rec")
+    try:
+        model_bytes = await redis.get("beats:model:rec")
+    except Exception as e:
+        print(f"Redis model fetch notice: {e}")
+        model_bytes = None
+
     if not model_bytes:
         return []
 
