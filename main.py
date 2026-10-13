@@ -1285,10 +1285,21 @@ async def get_radio(
     actual_song_id = TEMPLATE_SONG_MAP.get(song_id, song_id)
     exclude_ids = [s.strip() for s in exclude.split(",") if s.strip()] if exclude else []
 
+    actual_user_id = user_id
+    if user_id and user_id not in ["guest", "anonymous"]:
+        try:
+            user_res = client.table("users").select("id").eq("id", user_id).execute()
+            if not user_res.data:
+                name_res = client.table("users").select("id").ilike("name", user_id).limit(1).execute()
+                if name_res.data:
+                    actual_user_id = name_res.data[0]["id"]
+        except Exception:
+            pass
+
     try:
         songs = await radio_recs(
             seed_song_id=actual_song_id,
-            user_id=user_id,
+            user_id=actual_user_id,
             limit=limit,
             supabase=client,
             redis=r,
@@ -1298,7 +1309,7 @@ async def get_radio(
     except Exception as e:
         print(f"Radio generation error: {e}")
         from recommender import rule_based_recs
-        songs = await rule_based_recs(user_id, limit, client, r, now)
+        songs = await rule_based_recs(actual_user_id, limit, client, r, now)
 
     return {
         "seed_id": song_id,
