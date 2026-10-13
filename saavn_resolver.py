@@ -99,42 +99,125 @@ async def build_ytmusic_mood_queue(
     limit: int,
     client: Client,
     redis = None,
-    exclude_ids: List[str] = None
+    exclude_ids: List[str] = None,
+    user_id: str = "guest",
 ) -> List[dict]:
     """
     Builds the Up Next queue matching the exact musical mood of the seed song.
-    Uses ultra-fast catalog matching first (<50ms) with Redis caching,
-    ensuring zero-delay queue population for the player.
+    Integrates authentic YouTube Music watch playlist recommendations,
+    applies strict anti-fatigue filtering against the user's recent listening history,
+    and dynamically randomizes candidate pools to prevent repeating songs in the queue.
     """
+    import random
+    import asyncio
+
     seed_id = str(seed_song.get("id", ""))
     seed_title = (seed_song.get("title") or "").strip()
     seed_artist = (seed_song.get("artist") or "").strip()
     seed_genre = (seed_song.get("genre") or "mix").strip().lower()
 
     excluded = {str(x).strip() for x in (exclude_ids or []) if str(x).strip()}
-    excluded.add(seed_id)
+    if seed_id:
+        excluded.add(seed_id)
 
-    # 1. Fast Redis cache check (24 hour TTL)
-    cache_key = f"beats:yt_queue:{seed_id}:{limit}"
-    if redis:
+    # 1. Anti-fatigue: exclude last 60 tracks played by this user so the queue NEVER loops played songs
+    if user_id and user_id != "guest":
         try:
-            cached_raw = await redis.get(cache_key)
-            if cached_raw:
-                cached_list = json.loads(cached_raw)
-                if isinstance(cached_list, list):
-                    filtered = [s for s in cached_list if str(s.get("id")) not in excluded]
-                    if len(filtered) >= 3:
-                        return filtered[:limit]
-        except Exception:
-            pass
+            recent_res = client.table("play_events")\
+                .select("song_id")\
+                .eq("user_id", user_id)\
+                .order("played_at", desc=True)\
+                .limit(60)\
+                .execute()
+            for row in (recent_res.data or []):
+                sid = row.get("song_id")
+                if sid:
+                    excluded.add(str(sid))
+        except Exception as e:
+            print(f"Radio recent events exclusion error: {e}")
 
     queue: List[dict] = []
     seen_titles = {re.sub(r"[^a-zA-Z0-9]", "", seed_title.lower())}
     seen_ids = set(excluded)
 
-    # 2. Tier 1: Match songs by same artist / band (e.g. Agam, Vedan)
-    if seed_artist and seed_artist != "Unknown":
-        # Extract primary artist name (first artist before comma or feat)
+    # 2. Authentic YouTube Music Up Next watch playlist candidates
+    yt_candidates = []
+    cand_cache_key = f"beats:yt_candidates:{seed_id}"
+    if redis:
+        try:
+            cached_cands = await redis.get(cand_cache_key)
+            if cached_cands:
+                yt_candidates = json.loads(cached_cands)
+        except Exception:
+            pass
+
+    if not yt_candidates:
+        try:
+            def _fetch_yt_playlist():
+                try:
+                    yt = YTMusic()
+                    query = f"{seed_title} {seed_artist}".strip()
+                    search_res = yt.search(query, filter="songs")
+                    if not search_res:
+                        search_res = yt.search(seed_title, filter="songs")
+                    if search_res and "videoId" in search_res[0]:
+                        vid = search_res[0]["videoId"]
+                        wp = yt.get_watch_playlist(videoId=vid, limit=35)
+                        return wp.get("tracks", [])
+                except Exception as ex:
+                    print(f"YTMusic watch playlist fetch notice: {ex}")
+                return []
+
+            tracks = await asyncio.to_thread(_fetch_yt_playlist)
+            if tracks:
+                extracted_titles = []
+                for t in tracks:
+                    t_title = (t.get("title") or "").strip()
+                    if t_title and t_title.lower() != seed_title.lower():
+                        clean_t = re.sub(r'\(.*?\)|\[.*?\]', '', t_title).strip()
+                        if clean_t and len(clean_t) >= 2:
+                            extracted_titles.append(clean_t)
+
+                matched_songs = []
+                matched_seen = set()
+                for bt in extracted_titles[:15]:
+                    try:
+                        m_res = client.table("songs")\
+                            .select("*")\
+                            .eq("status", "available")\
+                            .ilike("title", f"%{bt[:20]}%")\
+                            .limit(2)\
+                            .execute()
+                        for s in (m_res.data or []):
+                            if s["id"] not in matched_seen and str(s["id"]) not in excluded:
+                                matched_seen.add(s["id"])
+                                matched_songs.append(s)
+                    except Exception:
+                        pass
+
+                yt_candidates = matched_songs
+                if redis and yt_candidates:
+                    try:
+                        await redis.set(cand_cache_key, json.dumps(yt_candidates), ex=3600)
+                    except Exception:
+                        pass
+        except Exception as yt_err:
+            print(f"YTMusic candidate resolution error: {yt_err}")
+
+    # Add YTMusic matched candidates
+    if yt_candidates:
+        random.shuffle(yt_candidates)
+        for s in yt_candidates:
+            norm = re.sub(r"[^a-zA-Z0-9]", "", (s.get("title") or "").lower())
+            if s["id"] not in seen_ids and norm not in seen_titles:
+                seen_ids.add(s["id"])
+                seen_titles.add(norm)
+                queue.append(s)
+            if len(queue) >= int(limit * 0.5):
+                break
+
+    # 3. Tier 1: Match songs by same artist / band
+    if len(queue) < limit and seed_artist and seed_artist != "Unknown":
         primary_artist = re.split(r"[,&|]|\sfeat\.?|\sft\.?", seed_artist, flags=re.I)[0].strip()
         if len(primary_artist) >= 3:
             try:
@@ -143,18 +226,22 @@ async def build_ytmusic_mood_queue(
                     .eq("status", "available")\
                     .ilike("artist", f"%{primary_artist}%")\
                     .order("play_count", desc=True)\
-                    .limit(limit)\
+                    .limit(25)\
                     .execute()
-                for s in (artist_res.data or []):
+                a_songs = artist_res.data or []
+                random.shuffle(a_songs)
+                for s in a_songs:
                     norm = re.sub(r"[^a-zA-Z0-9]", "", (s.get("title") or "").lower())
                     if s["id"] not in seen_ids and norm not in seen_titles:
                         seen_ids.add(s["id"])
                         seen_titles.add(norm)
                         queue.append(s)
+                    if len(queue) >= int(limit * 0.65):
+                        break
             except Exception as e:
                 print(f"Artist queue query error: {e}")
 
-    # 3. Tier 2: Match top songs from the same genre
+    # 4. Tier 2: Match songs from the same genre with dynamic variety
     if len(queue) < limit and seed_genre:
         try:
             genre_res = client.table("songs")\
@@ -162,9 +249,11 @@ async def build_ytmusic_mood_queue(
                 .eq("status", "available")\
                 .eq("genre", seed_genre)\
                 .order("play_count", desc=True)\
-                .limit(limit * 2)\
+                .limit(60)\
                 .execute()
-            for s in (genre_res.data or []):
+            g_songs = genre_res.data or []
+            random.shuffle(g_songs)
+            for s in g_songs:
                 norm = re.sub(r"[^a-zA-Z0-9]", "", (s.get("title") or "").lower())
                 if s["id"] not in seen_ids and norm not in seen_titles:
                     seen_ids.add(s["id"])
@@ -175,16 +264,18 @@ async def build_ytmusic_mood_queue(
         except Exception as e:
             print(f"Genre queue query error: {e}")
 
-    # 4. Tier 3: Global popular & trending backfill
+    # 5. Tier 3: Global popular & trending backfill with dynamic variety
     if len(queue) < limit:
         try:
             pop_res = client.table("songs")\
                 .select("*")\
                 .eq("status", "available")\
                 .order("play_count", desc=True)\
-                .limit(limit * 2)\
+                .limit(80)\
                 .execute()
-            for s in (pop_res.data or []):
+            p_songs = pop_res.data or []
+            random.shuffle(p_songs)
+            for s in p_songs:
                 norm = re.sub(r"[^a-zA-Z0-9]", "", (s.get("title") or "").lower())
                 if s["id"] not in seen_ids and norm not in seen_titles:
                     seen_ids.add(s["id"])
@@ -194,12 +285,5 @@ async def build_ytmusic_mood_queue(
                     break
         except Exception as e:
             print(f"Trending queue backfill error: {e}")
-
-    # 5. Cache the instant queue in Redis
-    if redis and queue:
-        try:
-            await redis.set(cache_key, json.dumps(queue[:limit]), ex=86400)
-        except Exception:
-            pass
 
     return queue[:limit]

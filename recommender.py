@@ -83,7 +83,7 @@ async def rule_based_recs(
 
     favorite_artists = []
     favorite_genres = []
-    recent_completed_ids = set()
+    recent_played_ids = set()
 
     # 1. Mine user's listening profile from recent play events
     try:
@@ -91,13 +91,13 @@ async def rule_based_recs(
             .select("song_id, genre, hour_of_day, completed")\
             .eq("user_id", user_id)\
             .order("played_at", desc=True)\
-            .limit(80)\
+            .limit(100)\
             .execute()
 
         events = history.data or []
         if events:
-            # Recent completed songs (anti-fatigue filtering)
-            recent_completed_ids = {e["song_id"] for e in events[:20] if e.get("completed")}
+            # Robust anti-fatigue filtering (exclude last 50 played tracks regardless of completion status)
+            recent_played_ids = {e["song_id"] for e in events[:50] if e.get("song_id")}
 
             # Genre weighting (completed events give 2x weight)
             genre_weights = Counter()
@@ -109,11 +109,11 @@ async def rule_based_recs(
             favorite_genres = [g for g, _ in genre_weights.most_common(3)]
 
             # Fetch artist affinity for completed tracks
-            sample_song_ids = [e["song_id"] for e in events if e.get("completed") and is_valid_uuid(e.get("song_id"))][:15]
+            sample_song_ids = [e["song_id"] for e in events if e.get("completed") and is_valid_uuid(e.get("song_id"))][:25]
             if sample_song_ids:
                 s_res = supabase.table("songs").select("artist").in_("id", sample_song_ids).execute()
                 artist_counts = Counter(s.get("artist") for s in (s_res.data or []) if s.get("artist"))
-                favorite_artists = [a for a, _ in artist_counts.most_common(3)]
+                favorite_artists = [a for a, _ in artist_counts.most_common(4)]
     except Exception as e:
         print(f"Taste profile mining notice for {user_id}: {e}")
 
@@ -123,8 +123,9 @@ async def rule_based_recs(
         if g not in blended_genres:
             blended_genres.append(g)
 
+    import random
     recommended = []
-    seen_ids = set(recent_completed_ids)
+    seen_ids = set(recent_played_ids)
 
     # 2. Tier 1: User's Favorite Artist Tracks (Personal Anchor - ~35%)
     artist_quota = max(3, int(limit * 0.35))
@@ -136,9 +137,11 @@ async def rule_based_recs(
                     .eq("status", "available")\
                     .ilike("artist", f"%{artist[:20]}%")\
                     .order("play_count", desc=True)\
-                    .limit(5)\
+                    .limit(20)\
                     .execute()
-                for s in (a_res.data or []):
+                a_songs = a_res.data or []
+                random.shuffle(a_songs)
+                for s in a_songs:
                     if s["id"] not in seen_ids:
                         seen_ids.add(s["id"])
                         recommended.append(s)
@@ -158,9 +161,12 @@ async def rule_based_recs(
             .eq("status", "available")\
             .in_("genre", target_genres)\
             .order("play_count", desc=True)\
-            .limit(40)\
+            .limit(60)\
             .execute()
-        for s in (mood_res.data or []):
+        m_songs = mood_res.data or []
+        # Dynamic variety: shuffle candidate pool to avoid static top-list looping
+        random.shuffle(m_songs)
+        for s in m_songs:
             if s["id"] not in seen_ids:
                 seen_ids.add(s["id"])
                 recommended.append(s)
@@ -175,9 +181,11 @@ async def rule_based_recs(
             .select("*")\
             .eq("status", "available")\
             .order("play_count", desc=True)\
-            .limit(50)\
+            .limit(80)\
             .execute()
-        for s in (trending_res.data or []):
+        t_songs = trending_res.data or []
+        random.shuffle(t_songs)
+        for s in t_songs:
             if s["id"] not in seen_ids:
                 seen_ids.add(s["id"])
                 recommended.append(s)
@@ -192,9 +200,11 @@ async def rule_based_recs(
             all_res = supabase.table("songs")\
                 .select("*")\
                 .eq("status", "available")\
-                .limit(limit * 2)\
+                .limit(limit * 3)\
                 .execute()
-            for s in (all_res.data or []):
+            all_songs = all_res.data or []
+            random.shuffle(all_songs)
+            for s in all_songs:
                 if s["id"] not in seen_ids:
                     seen_ids.add(s["id"])
                     recommended.append(s)
@@ -254,13 +264,14 @@ async def radio_recs(
         # Fallback to general time-aware recs
         return await rule_based_recs(user_id, limit, supabase, redis, now)
 
-    # 2. Build exact YouTube Music mood-matched Up Next queue
+    # 2. Build exact YouTube Music mood-matched Up Next queue with user anti-fatigue filtering
     return await build_ytmusic_mood_queue(
         seed_song=seed_song,
         limit=limit,
         client=supabase,
         redis=redis,
-        exclude_ids=exclude_ids
+        exclude_ids=exclude_ids,
+        user_id=user_id,
     )
 
 
@@ -287,6 +298,7 @@ async def ml_recs(
 
     try:
         import base64
+        import warnings
         if isinstance(model_bytes, bytes):
             try:
                 raw_bytes = base64.b64decode(model_bytes)
@@ -299,7 +311,10 @@ async def ml_recs(
                 raw_bytes = model_bytes.encode("latin-1")
         else:
             raw_bytes = model_bytes
-        model_data = joblib.load(io.BytesIO(raw_bytes))
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            model_data = joblib.load(io.BytesIO(raw_bytes))
     except Exception as e:
         print(f"Error unpickling model from Redis: {e}")
         return []
@@ -320,8 +335,8 @@ async def ml_recs(
         .execute()
     events = history.data or []
 
-    # Anti-fatigue filtering (songs finished recently)
-    recent_played_ids = {e["song_id"] for e in events[:15] if e.get("song_id")}
+    # Anti-fatigue filtering (songs listened to recently)
+    recent_played_ids = {e["song_id"] for e in events[:50] if e.get("song_id")}
 
     # Mine favorite artists from history
     favorite_artists = set()

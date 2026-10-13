@@ -530,57 +530,92 @@ def normalize_phonetic(text: str) -> str:
     return t
 
 
+SEARCH_STOP_WORDS = {"movie", "film", "song", "songs", "track", "tracks", "audio", "video", "full"}
+
+
+def strip_search_stopwords(q: str) -> str:
+    """Removes common conversational search keywords like 'movie', 'songs'."""
+    words = q.strip().split()
+    filtered = [w for w in words if w.lower() not in SEARCH_STOP_WORDS]
+    return " ".join(filtered) if filtered else q
+
+
+def normalize_search_text(text: str) -> str:
+    """Normalizes text by removing punctuation, lowercasing, and collapsing repeated characters."""
+    t = re.sub(r'[^\w\s]', ' ', (text or '').lower())
+    t = re.sub(r'(.)\1+', r'\1', t)
+    return " ".join(t.split())
+
+
 def generate_search_variants(q: str) -> list:
-    """Generate common romanized spelling variants (e.g., amsam <-> amsham, ghilli <-> gilli)."""
+    """Generate comprehensive romanized spelling, phonetic, and collapsed variants."""
     raw = q.strip().lower()
     variants = [raw]
 
-    # gh <-> g (e.g. ghilli <-> gilli, raghu <-> ragu)
+    # 1. Collapsed consecutive duplicate characters (e.g. allaaka -> alaka, loova -> lova)
+    collapsed = re.sub(r'(.)\1+', r'\1', raw)
+    if collapsed != raw:
+        variants.append(collapsed)
+
+    # 2. Query without conversational stopwords (e.g. 'om movie' -> 'om')
+    no_stop = strip_search_stopwords(raw)
+    if no_stop != raw and len(no_stop) >= 2:
+        variants.append(no_stop)
+        c_no_stop = re.sub(r'(.)\1+', r'\1', no_stop)
+        if c_no_stop != no_stop:
+            variants.append(c_no_stop)
+
+    # 3. Common Indian phonetic transliterations
     if "gh" in raw:
         variants.append(raw.replace("gh", "g"))
     elif "g" in raw:
         variants.append(raw.replace("g", "gh"))
 
-    # kh <-> k
     if "kh" in raw:
         variants.append(raw.replace("kh", "k"))
 
-    # bh <-> b
     if "bh" in raw:
         variants.append(raw.replace("bh", "b"))
 
-    # ph <-> p / f
     if "ph" in raw:
         variants.append(raw.replace("ph", "p"))
         variants.append(raw.replace("ph", "f"))
 
-    # s <-> sh (e.g. amsam <-> amsham, siva <-> shiva)
     if "sh" in raw:
         variants.append(raw.replace("sh", "s"))
     elif "s" in raw:
         variants.append(raw.replace("s", "sh"))
 
-    # th <-> t (e.g. karthik <-> kartik)
     if "th" in raw:
         variants.append(raw.replace("th", "t"))
     elif "t" in raw:
         variants.append(raw.replace("t", "th"))
 
-    # dh <-> d (e.g. anirudh <-> anirud)
     if "dh" in raw:
         variants.append(raw.replace("dh", "d"))
     elif "d" in raw:
         variants.append(raw.replace("d", "dh"))
 
-    # zh <-> l (e.g. tamizh <-> tamil)
     if "zh" in raw:
         variants.append(raw.replace("zh", "l"))
 
-    # Double vowels
-    if any(dv in raw for dv in ["aa", "ee", "oo"]):
-        variants.append(
-            raw.replace("aa", "a").replace("ee", "i").replace("oo", "u")
-        )
+    # Vowel and consonant duplications/reductions
+    if "oo" in raw:
+        variants.append(raw.replace("oo", "o"))
+        variants.append(raw.replace("oo", "u"))
+    if "ee" in raw:
+        variants.append(raw.replace("ee", "e"))
+        variants.append(raw.replace("ee", "i"))
+    if "aa" in raw:
+        variants.append(raw.replace("aa", "a"))
+    if "ll" in raw:
+        variants.append(raw.replace("ll", "l"))
+    if "vv" in raw:
+        variants.append(raw.replace("vv", "v"))
+    if "w" in raw:
+        variants.append(raw.replace("w", "v"))
+    elif "v" in raw:
+        variants.append(raw.replace("v", "w"))
 
     # Deduplicate while preserving order
     seen = set()
@@ -703,25 +738,70 @@ async def search_songs(
     songs_data = []
     seen_ids = set()
 
-    # 2.5 Ensure direct title matches are fetched first so they are never crowded out
-    try:
-        title_res = client.table("songs")\
-            .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
-            .eq("status", "available")\
-            .ilike("title", f"%{clean_q}%")\
-            .order("play_count", desc=True)\
-            .limit(50)\
-            .execute()
-        for s in (title_res.data or []):
-            if s["id"] not in seen_ids:
-                seen_ids.add(s["id"])
-                songs_data.append(s)
-    except Exception as e:
-        print(f"Title pre-search notice: {e}")
+    # 2.5 Ensure direct title and film matches are fetched first so they are never crowded out
+    direct_queries = [clean_q]
+    collapsed_q = re.sub(r'(.)\1+', r'\1', clean_q)
+    if collapsed_q != clean_q and len(collapsed_q) >= 2:
+        direct_queries.append(collapsed_q)
+    core_q = strip_search_stopwords(clean_q)
+    if core_q != clean_q and len(core_q) >= 2:
+        direct_queries.append(core_q)
+        c_core = re.sub(r'(.)\1+', r'\1', core_q)
+        if c_core != core_q:
+            direct_queries.append(c_core)
+
+    for dq in direct_queries:
+        try:
+            title_res = client.table("songs")\
+                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
+                .eq("status", "available")\
+                .ilike("title", f"%{dq}%")\
+                .order("play_count", desc=True)\
+                .limit(40)\
+                .execute()
+            for s in (title_res.data or []):
+                if s["id"] not in seen_ids:
+                    seen_ids.add(s["id"])
+                    songs_data.append(s)
+        except Exception as e:
+            print(f"Title pre-search notice for '{dq}': {e}")
+
+    # For movie titles or film name searches, also query film field and 'From ...' title patterns
+    film_terms = [core_q] if core_q and len(core_q) >= 2 else ([clean_q] if len(clean_q) >= 2 else [])
+    for fq in film_terms:
+        try:
+            film_res = client.table("songs")\
+                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
+                .eq("status", "available")\
+                .ilike("film", f"%{fq}%")\
+                .order("play_count", desc=True)\
+                .limit(30)\
+                .execute()
+            for s in (film_res.data or []):
+                if s["id"] not in seen_ids:
+                    seen_ids.add(s["id"])
+                    songs_data.append(s)
+        except Exception:
+            pass
+
+        try:
+            from_res = client.table("songs")\
+                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
+                .eq("status", "available")\
+                .ilike("title", f"%from %{fq}%")\
+                .order("play_count", desc=True)\
+                .limit(30)\
+                .execute()
+            for s in (from_res.data or []):
+                if s["id"] not in seen_ids:
+                    seen_ids.add(s["id"])
+                    songs_data.append(s)
+        except Exception:
+            pass
 
     # 3. Fast database OR query matching all variants with expanded candidate pool
     or_clauses = []
-    for v in variants[:4]:
+    for v in variants[:5]:
         or_clauses.extend([
             f"title.ilike.%{v}%",
             f"artist.ilike.%{v}%",
@@ -749,35 +829,29 @@ async def search_songs(
     except Exception as e:
         print(f"Search query error: {e}")
 
-    # 4. Multi-word & movie/genre matching
+    # 4. Multi-word & movie/genre matching: enforce AND across query words
     words = [w for w in clean_q.split() if len(w) >= 2]
-    if len(words) > 1 and len(songs_data) < limit:
+    words_no_stop = [w for w in strip_search_stopwords(clean_q).split() if len(w) >= 2]
+    effective_words = words_no_stop if words_no_stop else words
+
+    if len(effective_words) > 1 and len(songs_data) < candidate_limit:
         try:
-            genres_set = {"tamil", "malayalam", "hindi", "english", "mix", "telugu"}
-            q_genres = [w for w in words if w in genres_set]
-            q_terms = [w for w in words if w not in genres_set] or words
-
-            word_clauses = []
-            for term in q_terms:
-                term_variants = generate_search_variants(term)
-                for tv in term_variants[:4]:
-                    word_clauses.extend([
-                        f"film.ilike.%{tv}%",
-                        f"title.ilike.%{tv}%",
-                        f"artist.ilike.%{tv}%",
-                    ])
-            or_filter_words = ",".join(word_clauses)
-
             query_words = client.table("songs")\
                 .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
-                .eq("status", "available")\
-                .or_(or_filter_words)\
-                .limit(50)
+                .eq("status", "available")
 
-            if q_genres:
-                query_words = query_words.eq("genre", q_genres[0])
+            for term in effective_words[:3]:
+                term_variants = generate_search_variants(term)
+                term_clauses = []
+                for tv in term_variants[:3]:
+                    term_clauses.extend([
+                        f"title.ilike.%{tv}%",
+                        f"film.ilike.%{tv}%",
+                        f"artist.ilike.%{tv}%",
+                    ])
+                query_words = query_words.or_(",".join(term_clauses))
 
-            res_words = query_words.execute()
+            res_words = query_words.limit(50).execute()
             for s in (res_words.data or []):
                 if s["id"] not in seen_ids:
                     seen_ids.add(s["id"])
@@ -790,7 +864,6 @@ async def search_songs(
         try:
             import difflib
 
-            # Try to get catalog from Redis or Supabase
             catalog = []
             if r:
                 try:
@@ -812,7 +885,7 @@ async def search_songs(
                     except Exception:
                         pass
 
-            norm_q = normalize_phonetic(clean_q)
+            norm_q_phon = normalize_phonetic(clean_q)
             scored = []
             for s in catalog:
                 if s["id"] in seen_ids:
@@ -826,7 +899,7 @@ async def search_songs(
                 norm_artist = normalize_phonetic(artist)
 
                 score = 0.0
-                if norm_q and (norm_q in norm_title or norm_q in norm_film or norm_q in norm_artist):
+                if norm_q_phon and (norm_q_phon in norm_title or norm_q_phon in norm_film or norm_q_phon in norm_artist):
                     score = 0.90
                 else:
                     s_title = difflib.SequenceMatcher(None, clean_q, title.lower()).ratio()
@@ -844,11 +917,22 @@ async def search_songs(
         except Exception as e:
             print(f"Fuzzy matching error: {e}")
 
-    # 6. Dynamic on-the-fly search fetch if local catalog has limited results (< 3) OR lacks title match
-    has_title_match = any(clean_q in (s.get("title") or "").lower() for s in songs_data)
+    # 6. Dynamic on-the-fly search fetch if local catalog has limited results (< 3) OR lacks normalized title match
+    norm_search = normalize_search_text(clean_q)
+    norm_core = normalize_search_text(core_q)
+    q_words = [w for w in norm_core.split() if len(w) >= 2] or [w for w in norm_search.split() if len(w) >= 2]
+
+    has_title_match = any(
+        norm_search in normalize_search_text(s.get("title") or "")
+        or (norm_core and norm_core in normalize_search_text(s.get("title") or ""))
+        or (q_words and all(w in normalize_search_text(s.get("title") or "") for w in q_words))
+        for s in songs_data
+    )
     if len(songs_data) < 3 or not has_title_match:
         try:
             dynamic_songs = await fetch_dynamic_search_songs(clean_q, client, limit=limit)
+            if not dynamic_songs and core_q != clean_q and len(core_q) >= 2:
+                dynamic_songs = await fetch_dynamic_search_songs(core_q, client, limit=limit)
             for s in dynamic_songs:
                 if s["id"] not in seen_ids:
                     seen_ids.add(s["id"])
@@ -856,7 +940,7 @@ async def search_songs(
         except Exception as e:
             print(f"Dynamic fetch error in search: {e}")
 
-    # 7. Relevance-first ranking: Exact title -> Title prefix -> Title substring -> Artist -> Film -> Popularity
+    # 7. Relevance-first ranking: Exact/Collapsed title -> Substring -> Token intersection -> Film/Artist
     def compute_relevance(song: dict):
         title = (song.get("title") or "").strip().lower()
         film = (song.get("film") or "").strip().lower()
@@ -866,23 +950,43 @@ async def search_songs(
         clean_t = re.sub(r'[,()"\-:]', '', title).strip()
         clean_search = re.sub(r'[,()"\-:]', '', clean_q).strip()
 
+        norm_t = normalize_search_text(title)
+        norm_f = normalize_search_text(film)
+        norm_a = normalize_search_text(artist)
+
+        is_short_query = len(clean_q) <= 3 or (norm_core and len(norm_core) <= 3)
+        # If query is short (like 'om'), verify whole-word boundary
+        has_word_title = bool(re.search(rf"\b{re.escape(clean_q)}\b", title, re.I)) or (norm_core and bool(re.search(rf"\b{re.escape(norm_core)}\b", norm_t, re.I)))
+        has_word_film = bool(re.search(rf"\b{re.escape(clean_q)}\b", film, re.I)) or (norm_core and bool(re.search(rf"\b{re.escape(norm_core)}\b", norm_f, re.I)))
+        has_word_artist = bool(re.search(rf"\b{re.escape(clean_q)}\b", artist, re.I)) or (norm_core and bool(re.search(rf"\b{re.escape(norm_core)}\b", norm_a, re.I)))
+
         score = 0
-        if title == clean_q or clean_t == clean_search:
+        if title == clean_q or clean_t == clean_search or norm_t == norm_search or (norm_core and norm_t == norm_core):
             score = 1000
-        elif title.startswith(clean_q) or clean_t.startswith(clean_search):
+        elif title.startswith(clean_q) or clean_t.startswith(clean_search) or norm_t.startswith(norm_search) or (norm_core and norm_t.startswith(norm_core)):
+            score = 950
+        elif (clean_q in title or clean_search in clean_t or norm_search in norm_t or (norm_core and norm_core in norm_t)) and (not is_short_query or has_word_title):
             score = 900
-        elif clean_q in title or clean_search in clean_t:
+        elif q_words and all(w in norm_t for w in q_words) and (not is_short_query or has_word_title):
+            score = 850
+        elif (film == clean_q or norm_f == norm_search or norm_f.startswith(norm_search) or (norm_core and (norm_f == norm_core or norm_f.startswith(norm_core)))) and (not is_short_query or has_word_film):
             score = 800
-        elif artist == clean_q or artist.startswith(clean_q):
+        elif (clean_q in film or norm_search in norm_f or (norm_core and norm_core in norm_f)) and (not is_short_query or has_word_film):
+            score = 750
+        elif q_words and all(w in norm_f for w in q_words) and (not is_short_query or has_word_film):
             score = 700
-        elif clean_q in artist:
+        elif (artist == clean_q or norm_a == norm_search or norm_a.startswith(norm_search) or (norm_core and (norm_a == norm_core or norm_a.startswith(norm_core)))) and (not is_short_query or has_word_artist):
+            score = 650
+        elif (clean_q in artist or norm_search in norm_a or (norm_core and norm_core in norm_a)) and (not is_short_query or has_word_artist):
             score = 600
-        elif film == clean_q or film.startswith(clean_q):
-            score = 500
-        elif clean_q in film:
-            score = 400
+        elif q_words and all(w in norm_a for w in q_words) and (not is_short_query or has_word_artist):
+            score = 550
         else:
-            score = 100
+            if is_short_query and not (has_word_title or has_word_film or has_word_artist):
+                score = 50
+            else:
+                matched = sum(1 for w in q_words if w in norm_t or w in norm_f or w in norm_a) if q_words else 0
+                score = 100 + int((matched / max(len(q_words), 1)) * 300)
 
         return (score, p_count)
 
@@ -1044,6 +1148,14 @@ async def record_play_event(
         except Exception as r_err:
             print(f"Redis hot counter notice: {r_err}")
 
+        # Invalidate recommendation cache for this user so played tracks don't repeat
+        try:
+            r_keys = await r.keys(f"beats:recs:{event.user_id}:*")
+            if r_keys:
+                await r.delete(*r_keys)
+        except Exception:
+            pass
+
     # 3. Upsert user and increment user's total play count (activates ML recommendation tier)
     try:
         u_check = client.table("users").select("play_count").eq("id", event.user_id).limit(1).execute()
@@ -1141,10 +1253,10 @@ async def get_recommendations(
         "block_description": time_block["description"],
     }
 
-    # Cache 30 minutes
+    # Short 3-minute cache for dynamic variety and zero-delay performance
     if r:
         try:
-            await r.set(cache_key, json.dumps(result), ex=1800)
+            await r.set(cache_key, json.dumps(result), ex=180)
         except Exception:
             pass
     return result
@@ -1163,7 +1275,7 @@ async def get_radio(
     Generates a continuous, contextual queue based on seed song similarity,
     artist matching, and time-of-day atmosphere without requiring user intervention.
     """
-    r = getattr(request.app.state, "redis", None)
+    r = getattr(request.app.state, "redis", None) if request else None
     client = get_supabase_client()
     now = datetime.now(IST)
 
