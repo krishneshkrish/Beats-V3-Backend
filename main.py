@@ -94,10 +94,9 @@ async def warmup_catalog_cache(app: FastAPI):
             .execute()
         if res_global.data:
             await r.set("beats:songs:all:20", json.dumps({"songs": res_global.data}), ex=600)
-            await r.set("beats:trending:all", json.dumps({"trending": res_global.data}), ex=600)
 
         # 2. Top songs per genre
-        for g in ["tamil", "malayalam", "hindi", "english", "mix"]:
+        for g in ["tamil", "malayalam", "hindi", "english", "phonk", "mix"]:
             res_genre = client.table("songs")\
                 .select("id, title, artist, film, genre, duration, thumbnail_url, play_count")\
                 .eq("status", "available")\
@@ -107,7 +106,6 @@ async def warmup_catalog_cache(app: FastAPI):
                 .execute()
             if res_genre.data:
                 await r.set(f"beats:songs:{g}:20", json.dumps({"songs": res_genre.data}), ex=600)
-                await r.set(f"beats:trending:{g}", json.dumps({"trending": res_genre.data}), ex=600)
 
         # 3. Light catalog for instant search/fuzzy matching
         res_cat = client.table("songs")\
@@ -1149,11 +1147,13 @@ async def record_play_event(
         except Exception as r_err:
             print(f"Redis hot counter notice: {r_err}")
 
-        # Invalidate recommendation cache for this user so played tracks don't repeat
+        # Invalidate recommendation & trending caches so changes reflect immediately
         try:
             r_keys = await r.keys(f"beats:recs:{event.user_id}:*")
-            if r_keys:
-                await r.delete(*r_keys)
+            t_keys = await r.keys("beats:trending:dyn:*")
+            del_keys = (r_keys or []) + (t_keys or [])
+            if del_keys:
+                await r.delete(*del_keys)
         except Exception:
             pass
 
@@ -1354,15 +1354,27 @@ async def get_user(user_id: str):
 async def get_user_stats(user_id: str):
     """
     Returns play event data for dashboard:
-    total_songs, total_hours, top_genres, top_artists, heatmap
+    total_songs, total_hours, top_genres, top_artists, heatmap, dynamic taste profile
     """
     client = get_supabase_client()
+    now = datetime.now(IST)
     from datetime import timedelta
-    cutoff = (datetime.now(IST) - timedelta(days=30)).isoformat()
+    cutoff = (now - timedelta(days=30)).isoformat()
+
+    # Resolve UUID if user_id was passed as username
+    actual_uid = user_id
+    try:
+        if not is_valid_uuid(user_id):
+            u_lookup = client.table("users").select("id").ilike("name", user_id).limit(1).execute()
+            if u_lookup.data:
+                actual_uid = u_lookup.data[0]["id"]
+    except Exception:
+        pass
+
     try:
         res = client.table("play_events")\
             .select("id, song_id, played_at, hour_of_day, day_of_week, genre, songs(duration, artist)")\
-            .eq("user_id", user_id)\
+            .eq("user_id", actual_uid)\
             .gte("played_at", cutoff)\
             .execute()
         events = res.data or []
@@ -1371,7 +1383,7 @@ async def get_user_stats(user_id: str):
         try:
             res = client.table("play_events")\
                 .select("*")\
-                .eq("user_id", user_id)\
+                .eq("user_id", actual_uid)\
                 .gte("played_at", cutoff)\
                 .execute()
             events = res.data or []
@@ -1387,13 +1399,13 @@ async def get_user_stats(user_id: str):
 
     for ev in events:
         song_info = ev.get("songs") or {}
-        duration = song_info.get("duration") or 0
+        duration = (song_info.get("duration") if isinstance(song_info, dict) else None) or 210
         total_duration_sec += duration
 
-        genre = ev.get("genre") or "mix"
+        genre = (ev.get("genre") or "mix").strip().lower()
         genre_counts[genre] = genre_counts.get(genre, 0) + 1
 
-        artist = song_info.get("artist")
+        artist = song_info.get("artist") if isinstance(song_info, dict) else None
         if artist:
             artist_counts[artist] = artist_counts.get(artist, 0) + 1
 
@@ -1421,11 +1433,28 @@ async def get_user_stats(user_id: str):
 
     taste_profile = None
     try:
-        u_res = client.table("users").select("taste_profile").eq("id", user_id).limit(1).execute()
+        u_res = client.table("users").select("taste_profile").eq("id", actual_uid).limit(1).execute()
         if u_res.data and u_res.data[0].get("taste_profile"):
             taste_profile = u_res.data[0]["taste_profile"]
     except Exception:
         pass
+
+    # Dynamically personalize taste profile if not manually set
+    if not taste_profile and top_genres:
+        top_g = top_genres[0]["genre"].capitalize()
+        sec_g = f" and {top_genres[1]['genre'].capitalize()}" if len(top_genres) > 1 else ""
+        top_a = f" with high affinity for {top_artists[0]['artist']}" if top_artists else ""
+        
+        peak_h = 21
+        max_val = 0
+        for d in range(7):
+            for h in range(24):
+                if heatmap[str(d)][h] > max_val:
+                    max_val = heatmap[str(d)][h]
+                    peak_h = h
+        ampm = "AM" if peak_h < 12 else "PM"
+        disp_h = peak_h if (0 < peak_h <= 12) else (peak_h - 12 if peak_h > 12 else 12)
+        taste_profile = f"Heavy rotation on {top_g}{sec_g} soundscapes{top_a}. Consistent listening spike around {disp_h} {ampm}."
 
     return {
         "total_songs": total_songs,
@@ -1437,7 +1466,7 @@ async def get_user_stats(user_id: str):
     }
 
 
-# ─── 9. TRENDING SONGS ───
+# ─── 9. DYNAMIC TRENDING SONGS ───
 @app.get("/api/trending")
 async def get_trending(
     genre: Optional[str] = None,
@@ -1445,56 +1474,120 @@ async def get_trending(
     request: Request = None,
 ):
     """
-    Returns trending songs from Redis hot sets.
-    Falls back to Supabase play_count order.
+    Returns authentic, dynamic trending songs.
+    Blends real listener play velocity from the past 7 days with catalog rotation,
+    guaranteeing that Trending Now stays fresh, active, and never locked to old static songs.
     """
     r = getattr(request.app.state, "redis", None) if request else None
     client = get_supabase_client()
+    now = datetime.now(IST)
 
-    key = (
-        f"beats:hot:genre:{genre}"
-        if genre and genre != "all"
-        else "beats:hot:global"
-    )
+    clean_genre = genre.strip().lower() if genre and genre != "all" else None
+    cache_key = f"beats:trending:dyn:{clean_genre or 'all'}"
 
-    # Get top song IDs from Redis sorted set if connected
+    # 1. Check dynamic Redis cache (short 5-min TTL)
     if r:
         try:
-            song_ids = await r.zrevrange(key, 0, limit - 1)
-            if song_ids:
-                uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
-                valid_ids = [sid for sid in song_ids if uuid_re.match(sid)]
-                if valid_ids:
-                    res = client.table("songs")\
-                        .select(
-                            "id, title, artist, film, genre, "
-                            "duration, thumbnail_url, play_count"
-                        )\
-                        .in_("id", valid_ids)\
-                        .eq("status", "available")\
-                        .execute()
-                    if res.data:
-                        id_map = {s["id"]: s for s in res.data}
-                        ordered = [id_map[sid] for sid in valid_ids if sid in id_map]
-                        return {"songs": ordered, "source": "redis"}
+            cached = await r.get(cache_key)
+            if cached:
+                cached_data = json.loads(cached)
+                return {"songs": cached_data.get("songs", []), "source": "redis_dynamic"}
+        except Exception:
+            pass
+
+    # 2. Gather recent play events from last 7 days
+    from datetime import timedelta
+    from collections import Counter
+    cutoff = (now - timedelta(days=7)).isoformat()
+    recent_counts = Counter()
+    try:
+        ev_query = client.table("play_events").select("song_id, genre").gte("played_at", cutoff)
+        if clean_genre:
+            ev_query = ev_query.eq("genre", clean_genre)
+        ev_res = ev_query.limit(500).execute()
+        for ev in (ev_res.data or []):
+            sid = ev.get("song_id")
+            if sid:
+                recent_counts[sid] += 1
+    except Exception as e:
+        print(f"Trending events query notice: {e}")
+
+    trending_songs = []
+    seen_ids = set()
+
+    # 3. Pull top songs by recent listener velocity
+    if recent_counts:
+        top_recent_ids = [sid for sid, _ in recent_counts.most_common(limit)]
+        try:
+            s_res = client.table("songs")\
+                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count")\
+                .in_("id", top_recent_ids)\
+                .eq("status", "available")\
+                .execute()
+            id_map = {s["id"]: s for s in (s_res.data or [])}
+            for sid in top_recent_ids:
+                if sid in id_map and sid not in seen_ids:
+                    seen_ids.add(sid)
+                    trending_songs.append(id_map[sid])
         except Exception as e:
-            print(f"Trending Redis query notice: {e}")
+            print(f"Trending recent songs fetch notice: {e}")
 
-    # Fallback: Supabase play_count
-    query_builder = client.table("songs")\
-        .select(
-            "id, title, artist, film, genre, "
-            "duration, thumbnail_url, play_count"
-        )\
-        .eq("status", "available")\
-        .order("play_count", desc=True)\
-        .limit(limit)
+    # 4. Dynamic catalog backfill with daily variety
+    if len(trending_songs) < limit:
+        day_seed = now.timetuple().tm_yday
+        try:
+            if clean_genre:
+                cat_res = client.table("songs")\
+                    .select("id, title, artist, film, genre, duration, thumbnail_url, play_count")\
+                    .eq("status", "available")\
+                    .eq("genre", clean_genre)\
+                    .order("play_count", desc=True)\
+                    .limit(60)\
+                    .execute()
+                candidates = cat_res.data or []
+                if candidates:
+                    day_offset = (day_seed * 3) % len(candidates)
+                    rotated = candidates[day_offset:] + candidates[:day_offset]
+                    for s in rotated:
+                        if s["id"] not in seen_ids:
+                            seen_ids.add(s["id"])
+                            trending_songs.append(s)
+                        if len(trending_songs) >= limit:
+                            break
+            else:
+                # Balanced cross-genre blend for global trending
+                genres = ["tamil", "malayalam", "hindi", "english", "phonk", "mix"]
+                for g in genres:
+                    g_res = client.table("songs")\
+                        .select("id, title, artist, film, genre, duration, thumbnail_url, play_count")\
+                        .eq("status", "available")\
+                        .eq("genre", g)\
+                        .order("play_count", desc=True)\
+                        .limit(20)\
+                        .execute()
+                    g_cands = g_res.data or []
+                    if g_cands:
+                        offset = (day_seed * 2) % len(g_cands)
+                        g_rot = g_cands[offset:] + g_cands[:offset]
+                        for s in g_rot[:3]:
+                            if s["id"] not in seen_ids:
+                                seen_ids.add(s["id"])
+                                trending_songs.append(s)
+                            if len(trending_songs) >= limit:
+                                break
+                    if len(trending_songs) >= limit:
+                        break
+        except Exception as e:
+            print(f"Trending catalog backfill notice: {e}")
 
-    if genre and genre != "all":
-        query_builder = query_builder.eq("genre", genre)
+    # 5. Cache dynamically in Redis for 5 minutes
+    if r and trending_songs:
+        try:
+            await r.set(cache_key, json.dumps({"songs": trending_songs}), ex=300)
+        except Exception:
+            pass
 
-    res = query_builder.execute()
-    return {"songs": res.data or [], "source": "supabase"}
+    return {"songs": trending_songs[:limit], "source": "dynamic_velocity"}
 
 
 # ─── STREAM PROXY WITH RANGE SUPPORT (Fixes Masstamilan 403 & CORS) ───
