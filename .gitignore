@@ -45,3 +45,6 @@ desktop.ini
 
 # Logs
 *.log
+
+# Scratch scripts
+scratch/

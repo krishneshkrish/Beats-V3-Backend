@@ -79,8 +79,9 @@ async def fetch_saavn_song_on_the_fly(query: str, client: Client, preferred_genr
             raw_film = html.unescape(top.get("album") or "")
             film = raw_film.replace("&quot;", '"').replace("&#039;", "'").strip()
             thumb = (top.get("image") or "").replace("150x150", "500x500")
-            lang = top.get("language") or "Tamil"
-            genre = lang.lower() if lang.lower() in ["tamil", "hindi", "english", "malayalam", "phonk"] else "mix"
+            raw_lang = (top.get("language") or "").strip().lower()
+            lang = raw_lang.capitalize() if raw_lang else (preferred_genre.capitalize() if preferred_genre else "Tamil")
+            genre = raw_lang if raw_lang in ["tamil", "hindi", "english", "malayalam", "phonk", "telugu"] else (preferred_genre.lower() if preferred_genre else "mix")
             
             record = {
                 "title": title,
@@ -126,10 +127,14 @@ async def build_ytmusic_mood_queue(
     import random
     import asyncio
 
+    REGIONAL_LANGS = {"hindi", "tamil", "malayalam", "telugu", "kannada", "bengali", "punjabi"}
+
     seed_id = str(seed_song.get("id", ""))
     seed_title = (seed_song.get("title") or "").strip()
     seed_artist = (seed_song.get("artist") or "").strip()
     seed_genre = (seed_song.get("genre") or "mix").strip().lower()
+    seed_lang = (seed_song.get("language") or seed_genre or "mix").strip().lower()
+    effective_target = seed_lang if seed_lang in REGIONAL_LANGS else seed_genre
 
     excluded = {str(x).strip() for x in (exclude_ids or []) if str(x).strip()}
     if seed_id:
@@ -171,8 +176,25 @@ async def build_ytmusic_mood_queue(
         if not canon or canon in seen_titles:
             return False
         g = (s.get("genre") or "mix").strip().lower()
-        if seed_genre and seed_genre != "mix" and g != seed_genre:
+        if effective_target and effective_target != "mix" and g != effective_target:
             return False
+
+        # Strict linguistic integrity:
+        # If seed is Hindi, NEVER allow Tamil, Telugu, Malayalam, etc.
+        s_lang = (s.get("language") or g or "").strip().lower()
+        s_title = (s.get("title") or "").strip()
+        s_film = (s.get("film") or "").strip()
+
+        if seed_lang in REGIONAL_LANGS:
+            if s_lang in REGIONAL_LANGS and s_lang != seed_lang:
+                return False
+            if g in REGIONAL_LANGS and g != seed_lang:
+                return False
+            other_langs = REGIONAL_LANGS - {seed_lang}
+            pattern = r'\b(' + '|'.join(other_langs) + r')\b'
+            if re.search(pattern, s_title, re.I) or re.search(pattern, s_film, re.I):
+                return False
+
         # Cap max 2 tracks per primary artist in Up Next for healthy diversity
         art = re.split(r"[,&|]|\sfeat\.?|\sft\.?", s.get("artist") or "", flags=re.I)[0].strip().lower()
         if art and artist_counts.get(art, 0) >= 2:
@@ -232,8 +254,10 @@ async def build_ytmusic_mood_queue(
                 if len(raw_recos) < limit:
                     if seed_genre == "phonk":
                         fb_q = "drift phonk"
-                    elif seed_genre and seed_genre != "mix":
-                        fb_q = f"{seed_genre} hits"
+                    elif seed_lang in REGIONAL_LANGS:
+                        fb_q = f"{seed_lang} hits"
+                    elif effective_target and effective_target != "mix":
+                        fb_q = f"{effective_target} hits"
                     else:
                         fb_q = f"{seed_artist} songs" if seed_artist else "trending songs"
 
@@ -257,17 +281,29 @@ async def build_ytmusic_mood_queue(
                     if not enc:
                         continue
 
+                    raw_item_lang = (item.get("language") or "").strip().lower()
+                    album_name = html.unescape(item.get("album") or "").strip()
+
+                    # Linguistic filter on reco candidates (e.g. reject Tamil dubs of Hindi soundtracks)
+                    if seed_lang in REGIONAL_LANGS:
+                        if raw_item_lang in REGIONAL_LANGS and raw_item_lang != seed_lang:
+                            continue
+                        other_langs = REGIONAL_LANGS - {seed_lang}
+                        pattern = r'\b(' + '|'.join(other_langs) + r')\b'
+                        if re.search(pattern, title, re.I) or re.search(pattern, album_name, re.I):
+                            continue
+
                     raw_a = html.unescape(item.get("singers") or item.get("primary_artists") or "Various")
                     artist = raw_a.replace("&quot;", '"').replace("&#039;", "'").strip()
                     stream_url = decrypt_saavn_url(enc)
                     thumb = (item.get("image") or "").replace("150x150", "500x500")
-                    lang = item.get("language") or seed_genre.capitalize()
-                    genre = seed_genre if seed_genre and seed_genre != "mix" else (lang.lower() if lang.lower() in ["tamil", "hindi", "english", "malayalam", "phonk"] else "mix")
+                    lang = raw_item_lang if raw_item_lang else (seed_lang if seed_lang != "mix" else "mix")
+                    genre = lang if lang in ["tamil", "hindi", "english", "malayalam", "phonk", "telugu"] else "mix"
 
                     record = {
                         "title": title,
                         "artist": artist,
-                        "film": html.unescape(item.get("album") or "").strip(),
+                        "film": album_name,
                         "genre": genre,
                         "language": lang,
                         "duration": int(item.get("duration") or 180),
@@ -359,8 +395,8 @@ async def build_ytmusic_mood_queue(
                     .select("*")\
                     .eq("status", "available")\
                     .ilike("artist", f"%{primary_artist}%")
-                if seed_genre and seed_genre != "mix":
-                    artist_q = artist_q.eq("genre", seed_genre)
+                if effective_target and effective_target != "mix":
+                    artist_q = artist_q.eq("genre", effective_target)
 
                 artist_res = artist_q.order("play_count", desc=True).limit(30).execute()
                 a_songs = artist_res.data or []
@@ -373,13 +409,13 @@ async def build_ytmusic_mood_queue(
             except Exception as e:
                 print(f"Artist queue query error: {e}")
 
-    # 4. Tier 2: Match songs from the SAME genre (strictly preserve genre atmosphere)
-    if len(queue) < limit and seed_genre:
+    # 4. Tier 2: Match songs from the SAME genre/language (strictly preserve linguistic atmosphere)
+    if len(queue) < limit and effective_target and effective_target != "mix":
         try:
             genre_res = client.table("songs")\
                 .select("*")\
                 .eq("status", "available")\
-                .eq("genre", seed_genre)\
+                .eq("genre", effective_target)\
                 .order("play_count", desc=True)\
                 .limit(100)\
                 .execute()
@@ -393,12 +429,12 @@ async def build_ytmusic_mood_queue(
         except Exception as e:
             print(f"Genre queue query error: {e}")
 
-    # 5. Tier 3: Same genre trending backfill
+    # 5. Tier 3: Same genre/language trending backfill
     if len(queue) < limit:
         try:
             pop_q = client.table("songs").select("*").eq("status", "available")
-            if seed_genre and seed_genre != "mix":
-                pop_q = pop_q.eq("genre", seed_genre)
+            if effective_target and effective_target != "mix":
+                pop_q = pop_q.eq("genre", effective_target)
             pop_res = pop_q.order("play_count", desc=True).limit(100).execute()
             p_songs = pop_res.data or []
             random.shuffle(p_songs)

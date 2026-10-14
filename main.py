@@ -661,9 +661,9 @@ async def fetch_dynamic_search_songs(query: str, client: Client, limit: int = 10
                 raw_film = html.unescape(item.get("album") or "")
                 film = raw_film.replace("&quot;", '"').replace("&#039;", "'").strip() or "Single"
                 thumb = (item.get("image") or "").replace("150x150", "500x500")
-                lang = item.get("language") or "Tamil"
-                lang_lower = lang.lower()
-                genre = lang_lower if lang_lower in ["tamil", "hindi", "english", "malayalam", "phonk"] else "mix"
+                raw_lang = (item.get("language") or "").strip().lower()
+                lang = raw_lang.capitalize() if raw_lang else "Tamil"
+                genre = raw_lang if raw_lang in ["tamil", "hindi", "english", "malayalam", "phonk", "telugu"] else "mix"
                 dur = int(item.get("duration") or 180)
 
                 rec = {
@@ -671,7 +671,7 @@ async def fetch_dynamic_search_songs(query: str, client: Client, limit: int = 10
                     "artist": artist,
                     "film": film,
                     "genre": genre,
-                    "language": lang,
+                    "language": raw_lang or "tamil",
                     "duration": dur,
                     "thumbnail_url": thumb,
                     "source_url": stream_url,
@@ -691,6 +691,13 @@ async def fetch_dynamic_search_songs(query: str, client: Client, limit: int = 10
     except Exception as e:
         print(f"Dynamic search notice: {e}")
     return []
+
+
+MODIFIER_KEYWORDS = {
+    "remix", "piano", "techno", "nightcore", "slowed", "reverb", "speed", 
+    "sped up", "stripped", "live", "instrumental", "cover", "acoustic", 
+    "karaoke", "mashup", "tribute", "edit", "lofi", "lo-fi", "bass boosted"
+}
 
 
 # ─── 4. SEARCH SONGS ───
@@ -748,6 +755,16 @@ async def search_songs(
         c_core = re.sub(r'(.)\1+', r'\1', core_q)
         if c_core != core_q:
             direct_queries.append(c_core)
+
+    # Multi-token split (e.g. "Way down we go KALEO" -> pre-search "Way down we go")
+    q_tokens = [w for w in clean_q.split() if len(w) >= 2]
+    if len(q_tokens) > 1:
+        prefix_title = " ".join(q_tokens[:-1])
+        if len(prefix_title) >= 3:
+            direct_queries.append(prefix_title)
+        suffix_title = " ".join(q_tokens[1:])
+        if len(suffix_title) >= 3:
+            direct_queries.append(suffix_title)
 
     for dq in direct_queries:
         try:
@@ -924,7 +941,7 @@ async def search_songs(
     has_title_match = any(
         norm_search in normalize_search_text(s.get("title") or "")
         or (norm_core and norm_core in normalize_search_text(s.get("title") or ""))
-        or (q_words and all(w in normalize_search_text(s.get("title") or "") for w in q_words))
+        or (q_words and all(w in (normalize_search_text(s.get("title") or "") + " " + normalize_search_text(s.get("artist") or "")) for w in q_words))
         for s in songs_data
     )
     if len(songs_data) < 3 or not has_title_match:
@@ -953,6 +970,16 @@ async def search_songs(
         norm_f = normalize_search_text(film)
         norm_a = normalize_search_text(artist)
 
+        # Detect modifiers (remix, piano, techno, nightcore, slowed, etc.)
+        query_has_modifier = any(mod in clean_q for mod in MODIFIER_KEYWORDS)
+        song_has_modifier = any(re.search(rf"\b{re.escape(mod)}\b", title, re.I) for mod in MODIFIER_KEYWORDS)
+
+        # Detect combined title + artist match (e.g. "Way down we go KALEO", "Chammak Challo Akon")
+        t_words = [w for w in norm_t.split() if len(w) >= 2]
+        a_words = [w for w in norm_a.split() if len(w) >= 2]
+        has_title_part = norm_t in norm_search or (t_words and all(w in norm_search for w in t_words))
+        has_artist_part = norm_a in norm_search or (a_words and any(w in norm_search for w in a_words))
+
         is_short_query = len(clean_q) <= 3 or (norm_core and len(norm_core) <= 3)
         # If query is short (like 'om'), verify whole-word boundary
         has_word_title = bool(re.search(rf"\b{re.escape(clean_q)}\b", title, re.I)) or (norm_core and bool(re.search(rf"\b{re.escape(norm_core)}\b", norm_t, re.I)))
@@ -960,7 +987,9 @@ async def search_songs(
         has_word_artist = bool(re.search(rf"\b{re.escape(clean_q)}\b", artist, re.I)) or (norm_core and bool(re.search(rf"\b{re.escape(norm_core)}\b", norm_a, re.I)))
 
         score = 0
-        if title == clean_q or clean_t == clean_search or norm_t == norm_search or (norm_core and norm_t == norm_core):
+        if has_title_part and has_artist_part and len(q_words) > len(t_words):
+            score = 1150
+        elif title == clean_q or clean_t == clean_search or norm_t == norm_search or (norm_core and norm_t == norm_core):
             score = 1000
         elif title.startswith(clean_q) or clean_t.startswith(clean_search) or norm_t.startswith(norm_search) or (norm_core and norm_t.startswith(norm_core)):
             score = 950
@@ -986,6 +1015,15 @@ async def search_songs(
             else:
                 matched = sum(1 for w in q_words if w in norm_t or w in norm_f or w in norm_a) if q_words else 0
                 score = 100 + int((matched / max(len(q_words), 1)) * 300)
+
+        # Heavily penalize remixes / piano / techno / slowed / sped up / nightcore / covers if user did NOT ask for them
+        if song_has_modifier and not query_has_modifier:
+            score -= 400
+
+        # Exact clean title bonus: clean titles without brackets, parentheses, or modifiers get priority
+        has_bracket_tags = bool(re.search(r'[\(\[\{]', title))
+        if not has_bracket_tags and not song_has_modifier:
+            score += 50
 
         return (score, p_count)
 
