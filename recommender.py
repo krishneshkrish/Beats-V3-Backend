@@ -59,7 +59,17 @@ def get_time_block(hour: int = None) -> dict:
         }
 
 
-from saavn_resolver import TEMPLATE_SONG_MAP, is_valid_uuid, fetch_saavn_song_on_the_fly, build_ytmusic_mood_queue
+from saavn_resolver import (
+    TEMPLATE_SONG_MAP,
+    is_valid_uuid,
+    fetch_saavn_song_on_the_fly,
+    build_ytmusic_mood_queue,
+    infer_mood,
+    infer_song_features,
+    similarity_score,
+    apply_energy_arc,
+)
+
 
 
 async def rule_based_recs(

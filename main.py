@@ -328,6 +328,9 @@ async def fetch_saavn_song_on_the_fly(query: str, client: Client) -> Optional[di
             lang = top.get("language") or "Tamil"
             genre = lang.lower() if lang.lower() in ["tamil", "hindi", "english", "malayalam"] else "mix"
             
+            from saavn_resolver import infer_song_features
+            feats = infer_song_features(title, artist, genre)
+            
             record = {
                 "title": title,
                 "artist": artist,
@@ -339,11 +342,26 @@ async def fetch_saavn_song_on_the_fly(query: str, client: Client) -> Optional[di
                 "source_url": stream_url,
                 "source_site": "jiosaavn_cdn",
                 "play_count": 5000,
-                "status": "available"
+                "status": "available",
+                "mood": feats["mood"],
+                "energy_level": feats["energy_level"],
+                "vocal_type": feats["vocal_type"],
             }
-            res = client.table("songs").insert(record).execute()
-            if res.data:
-                return res.data[0]
+            try:
+                res = client.table("songs").insert(record).execute()
+                if res.data:
+                    return res.data[0]
+            except Exception as ins_err:
+                err_str = str(ins_err)
+                if "column" in err_str.lower() or "schema cache" in err_str.lower() or "42703" in err_str or "PGRST204" in err_str:
+                    fb_rec = {k: v for k, v in record.items() if k not in ("mood", "energy_level", "vocal_type")}
+                    try:
+                        res = client.table("songs").insert(fb_rec).execute()
+                        if res.data:
+                            return res.data[0]
+                    except Exception:
+                        pass
+                raise
     except Exception as e:
         print(f"Saavn dynamic fetch notice for '{query}': {e}")
     return None
@@ -1171,8 +1189,17 @@ async def record_play_event(
         except Exception as e:
             print(f"Play count increment error: {e}")
 
-    # 2. Redis hot counters (pipeline = one round trip)
+    # 2. Redis hot counters & session context
     if r:
+        if event.user_id:
+            try:
+                session_key = f"beats:session:{event.user_id}"
+                await r.lpush(session_key, actual_song_id)
+                await r.expire(session_key, 3600)
+                await r.ltrim(session_key, 0, 29)
+            except Exception as sess_err:
+                print(f"Session history push notice: {sess_err}")
+
         try:
             async with r.pipeline(transaction=False) as pipe:
                 pipe.zincrby("beats:hot:global", 1, actual_song_id)
@@ -1334,6 +1361,19 @@ async def get_radio(
                     actual_user_id = name_res.data[0]["id"]
         except Exception:
             pass
+
+    # Session context (Redis)
+    session_key = f"beats:session:{actual_user_id}"
+    if r:
+        try:
+            session_played = await r.lrange(session_key, 0, -1)
+            if session_played:
+                for sp in session_played:
+                    sp_clean = str(sp).strip()
+                    if sp_clean and sp_clean not in exclude_ids:
+                        exclude_ids.append(sp_clean)
+        except Exception as se_err:
+            print(f"Session history read error: {se_err}")
 
     try:
         songs = await radio_recs(

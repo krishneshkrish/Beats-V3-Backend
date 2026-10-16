@@ -16,11 +16,26 @@ create table if not exists songs (
   source_url text,
   source_site text,
   year integer,
+  mood text,
+  energy_level text,
+  vocal_type text,
   play_count bigint default 0,
   search_count bigint default 0,
   status text default 'available',
   scraped_at timestamptz default now()
 );
+
+-- Migration for existing deployments:
+alter table songs 
+  add column if not exists mood text,
+  add column if not exists energy_level text,
+  add column if not exists vocal_type text;
+
+-- Feature column values:
+-- mood: 'cinematic' | 'romantic' | 'sad' | 'energetic' | 'dark' | 'chill' | 'neutral'
+-- energy_level: 'low' | 'medium' | 'high'
+-- vocal_type: 'instrumental' | 'vocal'
+
 
 -- status values:
 -- 'available'   → has source_url, can stream
