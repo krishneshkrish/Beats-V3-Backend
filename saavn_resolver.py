@@ -75,21 +75,21 @@ def infer_mood(title: str, artist: str = "", genre: str = "") -> str:
     if re.search(r'\b(sad|cry|crying|tears|dard|judaai|broken|alone|lonely|heartache|pain|sorrow|breakup|goodbye|yaadein|dukh|viraham|kanneer|pirivu|miss you|void|hurt|lost|distance|alvida|dhoke|bewafa|tanhai|marham|gham|rona|judai)\b', t):
         return "sad"
 
-    # 3. Romantic / Love / Ballad
-    if re.search(r'\b(love|romantic|romance|dil|pyaar|kadhal|prema|premam|ishq|darling|sweetheart|jaan|sanam|baby|kiss|wedding|soulmate|heartbeat|nee|ennai|kanna|priya|manam|mohabbat|humsafar|deewana|anbe|azhage|uyire|thodu|shona|beloved|tera|meri|humdum|aashiqui|tum|saathiya|baahon|naina|tere|lover|valentine)\b', t):
+    # 3. Energetic / Party / Gym / High Tempo / Drill / Banger / Kuthu
+    if re.search(r'\b(rowdy|party|dance|club|remix|workout|gym|beat|blast|drop|jump|edm|electro|hyper|dhol|kuthu|kuththu|dappan|dappankuthu|gaana|gana|soorathenga|appadipodu|villu|thara local|fire|boost|bass|drill|fast|rock|groove|energy|power|banger|macho|dhamaka|dj|anthem|carnival|bhangra|trap|hardstyle|aaluma|marana|pathala|sodakku|morattu|jalabulajangu|chammak)\b', t) or any(k in a for k in ["gana ", "gaana "]):
+        return "energetic"
+
+    # 4. Romantic / Love / Melody / Ballad
+    if re.search(r'\b(adiye|adiyae|kadhal\w*|kaadhal\w*|anb\w*|azhag\w*|uyir\w*|kanman\w*|kannam\w*|nenj\w*|kangal\w*|vizhi\w*|kavidha\w*|kavitha\w*|thendral\w*|mazha\w*|poov\w*|malar\w*|unakkul\w*|ennodu\w*|thodu\w*|sidu\w*|thuli\w*|idhazh\w*|premam?\w*|aaradhik\w*|darshan\w*|sneham\w*|priya\w*|swapnam\w*|priyathama\w*|hrudayam\w*|oohalu\w*|inkem\w*|cheliya\w*|undipora\w*|kesariya\w*|tum\w*|ishq\w*|pyaar\w*|dil\w*|mohabbat\w*|humsafar\w*|deewana\w*|saathiya\w*|khairiyat\w*|sukoon\w*|love|romantic|romance|darling|sweetheart|jaan|sanam|baby|kiss|wedding|soulmate|heartbeat|shona|beloved|tera|meri|humdum|aashiqui|baahon|naina|tere|lover|valentine|melody|melliname|vaseegara|kurumugil|kadhalaada|innum|mayakkama)\b', t):
         return "romantic"
 
-    # 4. Chill / Lofi / Calm / Acoustic / Relaxation
+    # 5. Chill / Lofi / Calm / Acoustic / Relaxation
     if re.search(r'\b(chill|lofi|slow|acoustic|unplugged|calm|relax|peace|sleep|breeze|rain|soft|ambient|coffee|meditation|sunset|midnight|night|easy|sweet|sukoon|quiet|cloud|lazy|hawa|raat|dream|chai|breathe|serene)\b', t):
         return "chill"
 
-    # 5. Cinematic / Mass / Trailer / OST / Score
+    # 6. Cinematic / Mass / Trailer / OST / Score
     if re.search(r'\b(theme|ost|score|trailer|intro|symphony|orchestra|epic|interstellar|dune|bgm|mass|interval|teaser|climax|title track|villain|entry|roar|legend|warrior|kingdom|rise|tribute|soundtrack)\b', t):
         return "cinematic"
-
-    # 6. Energetic / Party / Gym / High Tempo / Drill / Banger
-    if re.search(r'\b(party|dance|club|remix|workout|gym|beat|blast|drop|jump|edm|electro|hyper|dhol|kuthu|thara local|fire|boost|bass|drill|fast|rock|groove|energy|power|banger|macho|dhamaka|dj|anthem|carnival|bhangra|trap|hardstyle)\b', t):
-        return "energetic"
 
     # 7. Contextual Fallbacks
     if g in ["phonk", "edm", "rock"]:
@@ -108,12 +108,13 @@ def infer_energy_level(title: str, artist: str = "", genre: str = "", mood: str 
     Infers energy level: 'low' | 'medium' | 'high'
     """
     t = (title or "").lower()
+    a = (artist or "").lower()
     g = (genre or "").lower()
     m = (mood or infer_mood(title, artist, genre)).lower()
 
-    if m == "energetic" or g in ["phonk", "rock", "edm"] or any(k in t for k in ["remix", "bass", "party", "gym", "fast", "drill", "boost"]):
+    if m == "energetic" or g in ["phonk", "rock", "edm"] or any(k in t for k in ["rowdy", "remix", "bass", "party", "gym", "fast", "drill", "boost", "kuthu", "kuththu", "gaana", "gana", "blast", "dhol"]) or any(k in a for k in ["gana ", "gaana "]):
         return "high"
-    if m in ["sad", "chill"] or g in ["lofi", "acoustic", "ambient"] or any(k in t for k in ["acoustic", "unplugged", "slow", "lofi", "piano", "calm"]):
+    if m in ["sad", "chill"] or g in ["lofi", "acoustic", "ambient"] or any(k in t for k in ["adiye", "acoustic", "unplugged", "slow", "lofi", "piano", "calm", "melliname", "soft", "jazz", "soul"]):
         return "low"
     return "medium"
 
@@ -159,11 +160,21 @@ def similarity_score(seed: dict, candidate: dict) -> float:
     cand_a = candidate.get("artist") or ""
     cand_g = candidate.get("genre") or ""
 
-    seed_m = (seed.get("mood") or infer_mood(seed_t, seed_a, seed_g)).strip().lower()
-    cand_m = (candidate.get("mood") or infer_mood(cand_t, cand_a, cand_g)).strip().lower()
+    seed_m = (seed.get("mood") or "").strip().lower()
+    if not seed_m or seed_m in ("neutral", "unknown"):
+        seed_m = infer_mood(seed_t, seed_a, seed_g)
 
-    seed_e = (seed.get("energy_level") or infer_energy_level(seed_t, seed_a, seed_g, mood=seed_m)).strip().lower()
-    cand_e = (candidate.get("energy_level") or infer_energy_level(cand_t, cand_a, cand_g, mood=cand_m)).strip().lower()
+    cand_m = (candidate.get("mood") or "").strip().lower()
+    if not cand_m or cand_m in ("neutral", "unknown"):
+        cand_m = infer_mood(cand_t, cand_a, cand_g)
+
+    seed_e = (seed.get("energy_level") or "").strip().lower()
+    if not seed_e or seed_e == "medium":
+        seed_e = infer_energy_level(seed_t, seed_a, seed_g, mood=seed_m)
+
+    cand_e = (candidate.get("energy_level") or "").strip().lower()
+    if not cand_e or cand_e == "medium":
+        cand_e = infer_energy_level(cand_t, cand_a, cand_g, mood=cand_m)
 
     seed_v = (seed.get("vocal_type") or infer_vocal_type(seed_t, seed_a)).strip().lower()
     cand_v = (candidate.get("vocal_type") or infer_vocal_type(cand_t, cand_a)).strip().lower()
@@ -446,11 +457,19 @@ async def build_ytmusic_mood_queue(
     seed_lang = (seed_song.get("language") or seed_genre or "mix").strip().lower()
     effective_target = seed_lang if seed_lang in REGIONAL_LANGS else seed_genre
 
-    # Ensure seed song has feature fields populated
+    # Ensure seed song has feature fields accurately populated
     seed_feats = infer_song_features(seed_title, seed_artist, seed_genre)
-    seed_song.setdefault("mood", seed_feats["mood"])
-    seed_song.setdefault("energy_level", seed_feats["energy_level"])
-    seed_song.setdefault("vocal_type", seed_feats["vocal_type"])
+    seed_mood = (seed_song.get("mood") or seed_feats["mood"]).lower()
+    if seed_mood in ("neutral", "", "unknown") and seed_feats["mood"] != "neutral":
+        seed_mood = seed_feats["mood"]
+    seed_energy = (seed_song.get("energy_level") or seed_feats["energy_level"]).lower()
+    if seed_energy == "medium" and seed_feats["energy_level"] != "medium":
+        seed_energy = seed_feats["energy_level"]
+    seed_vocal = (seed_song.get("vocal_type") or seed_feats["vocal_type"]).lower()
+    seed_song["mood"] = seed_mood
+    seed_song["energy_level"] = seed_energy
+    seed_song["vocal_type"] = seed_vocal
+
 
     excluded = {str(x).strip() for x in (exclude_ids or []) if str(x).strip()}
     if seed_id:
@@ -526,24 +545,34 @@ async def build_ytmusic_mood_queue(
                 pass
             return []
 
-        tracks = await asyncio.wait_for(asyncio.to_thread(_fetch_yt_playlist), timeout=3.5)
+        tracks = await asyncio.wait_for(asyncio.to_thread(_fetch_yt_playlist), timeout=4.0)
         if tracks:
-            for t in tracks:
+            sem = asyncio.Semaphore(8)
+
+            async def _resolve_yt_track(t):
                 t_title = (t.get("title") or "").strip()
                 canon_t = get_canonical_title(t_title)
                 if not canon_t or canon_t in seen_titles:
-                    continue
+                    return None
                 clean_t = re.sub(r'\(.*?\)|\[.*?\]', '', t_title).strip()
                 artists = t.get("artists", [])
                 primary_art = artists[0].get("name", "") if artists else ""
                 if len(clean_t) >= 2:
-                    dyn = await fetch_saavn_song_on_the_fly(f"{clean_t} {primary_art}".strip(), client, preferred_genre=seed_genre)
-                    if dyn:
-                        add_candidate(dyn)
-                if len(candidate_pool) >= limit * 2:
-                    break
+                    async with sem:
+                        return await fetch_saavn_song_on_the_fly(
+                            f"{clean_t} {primary_art}".strip(),
+                            client,
+                            preferred_genre=seed_genre
+                        )
+                return None
+
+            resolved_batch = await asyncio.gather(*[_resolve_yt_track(t) for t in tracks[:12]])
+            for dyn in resolved_batch:
+                if dyn:
+                    add_candidate(dyn)
     except Exception as yt_err:
         print(f"Tier 1 (YTMusic watch playlist) notice: {yt_err}")
+
 
     # ══════════════════════════════════════════════════════════
     # TIER 2: Saavn Native Reco Engine
@@ -586,7 +615,14 @@ async def build_ytmusic_mood_queue(
                     if seed_genre == "phonk":
                         fb_q = "drift phonk"
                     elif seed_lang in REGIONAL_LANGS:
-                        fb_q = f"{seed_lang} hits"
+                        if seed_mood in ("romantic", "chill") or seed_energy == "low":
+                            fb_q = f"{seed_lang} love melody hits"
+                        elif seed_mood == "sad":
+                            fb_q = f"{seed_lang} sad melody songs"
+                        elif seed_mood == "energetic" or seed_energy == "high":
+                            fb_q = f"{seed_lang} dance party hits"
+                        else:
+                            fb_q = f"{seed_lang} hits"
                     elif effective_target and effective_target != "mix":
                         fb_q = f"{effective_target} hits"
                     else:
@@ -698,11 +734,23 @@ async def build_ytmusic_mood_queue(
         cat_q = client.table("songs").select("*").eq("status", "available")
         if effective_target and effective_target != "mix":
             cat_q = cat_q.eq("genre", effective_target)
-        cat_res = cat_q.order("play_count", desc=True).limit(60).execute()
+        cat_res = cat_q.order("play_count", desc=True).limit(100).execute()
         for s in (cat_res.data or []):
+            s_m = infer_mood(s.get("title", ""), s.get("artist", ""), s.get("genre", ""))
+            s_e = infer_energy_level(s.get("title", ""), s.get("artist", ""), s.get("genre", ""), mood=s_m)
+            if seed_mood in ("romantic", "chill") or seed_energy == "low":
+                if s_m not in ("romantic", "chill") or s_e == "high":
+                    continue
+            elif seed_mood == "sad":
+                if s_m not in ("sad", "chill") or s_e == "high":
+                    continue
+            elif seed_mood == "energetic" or seed_energy == "high":
+                if s_m in ("sad", "chill") or s_e == "low":
+                    continue
             add_candidate(s)
     except Exception as cat_err:
         print(f"Tier 3 (Semantic catalogue) notice: {cat_err}")
+
 
     # ══════════════════════════════════════════════════════════
     # TIER 4: Same Artist (Recent songs only, last 2 years)
@@ -746,8 +794,19 @@ async def build_ytmusic_mood_queue(
         pop_q = client.table("songs").select("*").eq("status", "available")
         if effective_target and effective_target != "mix":
             pop_q = pop_q.eq("genre", effective_target)
-        pop_res = pop_q.order("play_count", desc=True).limit(50).execute()
+        pop_res = pop_q.order("play_count", desc=True).limit(100).execute()
         for s in (pop_res.data or []):
+            s_m = infer_mood(s.get("title", ""), s.get("artist", ""), s.get("genre", ""))
+            s_e = infer_energy_level(s.get("title", ""), s.get("artist", ""), s.get("genre", ""), mood=s_m)
+            if seed_mood in ("romantic", "chill") or seed_energy == "low":
+                if s_m not in ("romantic", "chill") or s_e == "high":
+                    continue
+            elif seed_mood == "sad":
+                if s_m not in ("sad", "chill") or s_e == "high":
+                    continue
+            elif seed_mood == "energetic" or seed_energy == "high":
+                if s_m in ("sad", "chill") or s_e == "low":
+                    continue
             add_candidate(s)
     except Exception as pop_err:
         print(f"Tier 5 (Trending backfill) notice: {pop_err}")
@@ -763,6 +822,7 @@ async def build_ytmusic_mood_queue(
 
     # 3. Filter candidates
     artist_pool_counts: Dict[str, int] = {}
+    film_pool_counts: Dict[str, int] = {}
 
     def can_add_song(s: dict) -> bool:
         sid = str(s.get("id", ""))
@@ -790,10 +850,51 @@ async def build_ytmusic_mood_queue(
             if re.search(pattern, s_title, re.I) or re.search(pattern, s_film, re.I):
                 return False
 
-        # Total maximum 2 tracks per primary artist in the candidate pool
+        # Strict acoustic mood and energy harmony (no jarring transitions)
+        s_m = (s.get("mood") or "").strip().lower()
+        if not s_m or s_m in ("neutral", "unknown"):
+            s_m = infer_mood(s_title, s.get("artist", ""), s.get("genre", ""))
+
+        s_e = (s.get("energy_level") or "").strip().lower()
+        if not s_e or s_e == "medium":
+            s_e = infer_energy_level(s_title, s.get("artist", ""), s.get("genre", ""), mood=s_m)
+
+        # If seed is romantic or calm/chill melody (e.g. "Adiye"):
+        # Strictly reject non-matching songs (require romantic or chill, forbid high energy)
+        if seed_mood in ("romantic", "chill") or seed_energy == "low":
+            if s_m not in ("romantic", "chill") or s_e == "high":
+                return False
+
+        # If seed is sad: strictly reject energetic or party tracks
+        if seed_mood == "sad":
+            if s_m not in ("sad", "chill") or s_e == "high":
+                return False
+
+        # If seed is energetic / dance: strictly reject sad or sleepy acoustic tracks
+        if seed_mood == "energetic" or seed_energy == "high":
+            if s_m in ("sad", "chill") or s_e == "low":
+                return False
+
+        # If seed is dark: reject light romantic pop
+        if seed_mood == "dark":
+            if s_m in ("romantic", "chill"):
+                return False
+
+        # Album / Film diversity: max 2 songs per film / album
+        film_clean = s_film.lower()
+        if film_clean and film_clean not in ("single", "album", "unknown", ""):
+            if film_pool_counts.get(film_clean, 0) >= 2:
+                return False
+
+        # Artist diversity: check primary and all co-artists
         art = get_primary_artist(s)
         if art and artist_pool_counts.get(art, 0) >= 2:
             return False
+        raw_artists = [a.strip().lower() for a in re.split(r"[,&|]|\sfeat\.?|\sft\.?", s.get("artist") or "", flags=re.I) if len(a.strip()) >= 3]
+        for a_name in raw_artists:
+            if artist_pool_counts.get(a_name, 0) >= 2:
+                return False
+
         return True
 
     qualified_songs: List[dict] = []
@@ -807,7 +908,14 @@ async def build_ytmusic_mood_queue(
             art = get_primary_artist(s)
             if art:
                 artist_pool_counts[art] = artist_pool_counts.get(art, 0) + 1
+            raw_artists = [a.strip().lower() for a in re.split(r"[,&|]|\sfeat\.?|\sft\.?", s.get("artist") or "", flags=re.I) if len(a.strip()) >= 3]
+            for a_name in raw_artists:
+                artist_pool_counts[a_name] = artist_pool_counts.get(a_name, 0) + 1
+            film_clean = (s.get("film") or "").strip().lower()
+            if film_clean and film_clean not in ("single", "album", "unknown", ""):
+                film_pool_counts[film_clean] = film_pool_counts.get(film_clean, 0) + 1
             qualified_songs.append(s)
+
 
     # ─── ENERGY ARC ARRANGEMENT & ARTIST DIVERSITY ───
     final_queue = apply_energy_arc(qualified_songs, limit=limit)

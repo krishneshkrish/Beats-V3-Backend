@@ -1375,6 +1375,16 @@ async def get_radio(
         except Exception as se_err:
             print(f"Session history read error: {se_err}")
 
+    # Radio response cache check (fast 5ms return for identical seeds)
+    radio_cache_key = f"beats:radio:{actual_song_id}:{actual_user_id}:{limit}"
+    if r and not exclude_ids:
+        try:
+            cached_radio = await r.get(radio_cache_key)
+            if cached_radio:
+                return json.loads(cached_radio)
+        except Exception:
+            pass
+
     try:
         songs = await radio_recs(
             seed_song_id=actual_song_id,
@@ -1390,12 +1400,21 @@ async def get_radio(
         from recommender import rule_based_recs
         songs = await rule_based_recs(actual_user_id, limit, client, r, now)
 
-    return {
+    result = {
         "seed_id": song_id,
         "songs": songs,
         "time_block": time_block["key"],
         "block_name": time_block["name"],
     }
+
+    if r and songs and not exclude_ids:
+        try:
+            await r.set(radio_cache_key, json.dumps(result), ex=600)
+        except Exception:
+            pass
+
+    return result
+
 
 
 # ─── 8. USER MANAGEMENT ───
