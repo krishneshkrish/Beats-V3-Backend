@@ -71,16 +71,16 @@ def infer_mood(title: str, artist: str = "", genre: str = "") -> str:
     if re.search(r'\b(dark|demon|devil|shadow|evil|doom|horror|blood|gothic|sinister|nightmare|assassin|psycho|ghost|curse|wrath|rage|death|underworld|monster|hell|wicked|venom|creepy)\b', t):
         return "dark"
 
-    # 2. Sad / Heartbreak / Pain / Grief
-    if re.search(r'\b(sad|cry|crying|tears|dard|judaai|broken|alone|lonely|heartache|pain|sorrow|breakup|goodbye|yaadein|dukh|viraham|kanneer|pirivu|miss you|void|hurt|lost|distance|alvida|dhoke|bewafa|tanhai|marham|gham|rona|judai)\b', t):
+    # 2. Sad / Heartbreak / Pain / Grief / Melancholy
+    if re.search(r'\b(sad|cry|crying|tears|dard|judaai|broken|alone|lonely|heartache|pain|sorrow|breakup|goodbye|yaadein|dukh|viraham|kanneer|pirivu|miss you|void|hurt|lost|distance|alvida|dhoke|bewafa|tanhai|marham|gham|rona|judai|channa mereya|sunn raha hai|agar tum saath ho|kabira|tujhe bhula diya|adhuri kahani|bekhayali|pachtaoge|thodi jagah|humdard|khamoshiyan|let her go|someone like you|glimpse of us|drivers license|traitor|arcade|another love|all i want|when i was your man|say something|happier|fix you)\b', t):
         return "sad"
 
     # 3. Energetic / Party / Gym / High Tempo / Drill / Banger / Kuthu
-    if re.search(r'\b(rowdy|party|dance|club|remix|workout|gym|beat|blast|drop|jump|edm|electro|hyper|dhol|kuthu|kuththu|dappan|dappankuthu|gaana|gana|soorathenga|appadipodu|villu|thara local|fire|boost|bass|drill|fast|rock|groove|energy|power|banger|macho|dhamaka|dj|anthem|carnival|bhangra|trap|hardstyle|aaluma|marana|pathala|sodakku|morattu|jalabulajangu|chammak)\b', t) or any(k in a for k in ["gana ", "gaana "]):
+    if re.search(r'\b(rowdy|party|dance|club|remix|workout|gym|beat|blast|drop|jump|edm|electro|hyper|dhol|kuthu|kuththu|dappan|dappankuthu|gaana|gana|soorathenga|appadipodu|villu|thara local|fire|boost|bass|drill|fast|rock|groove|energy|power|banger|macho|dhamaka|dj|anthem|carnival|bhangra|trap|hardstyle|aaluma|marana|pathala|sodakku|morattu|jalabulajangu|chammak|chull|saki|garmi|nachde|nachle|kala chashma|thumakda|badtameez|hookah|sooraj dooba|ghungroo|balam pichkari|swag|makhna|zingaat|coca cola|aankh marey|bom diggy|sheila|chikni|kamariya|cutiepie|buzz|thumka|shava)\b', t) or any(k in a for k in ["gana ", "gaana ", "badshah", "honey singh", "raftaar", "karan aujla", "sidhu moose", "divine", "emiway", "skrillex", "marshmello", "dj snake"]):
         return "energetic"
 
     # 4. Romantic / Love / Melody / Ballad
-    if re.search(r'\b(adiye|adiyae|kadhal\w*|kaadhal\w*|anb\w*|azhag\w*|uyir\w*|kanman\w*|kannam\w*|nenj\w*|kangal\w*|vizhi\w*|kavidha\w*|kavitha\w*|thendral\w*|mazha\w*|poov\w*|malar\w*|unakkul\w*|ennodu\w*|thodu\w*|sidu\w*|thuli\w*|idhazh\w*|premam?\w*|aaradhik\w*|darshan\w*|sneham\w*|priya\w*|swapnam\w*|priyathama\w*|hrudayam\w*|oohalu\w*|inkem\w*|cheliya\w*|undipora\w*|kesariya\w*|tum\w*|ishq\w*|pyaar\w*|dil\w*|mohabbat\w*|humsafar\w*|deewana\w*|saathiya\w*|khairiyat\w*|sukoon\w*|love|romantic|romance|darling|sweetheart|jaan|sanam|baby|kiss|wedding|soulmate|heartbeat|shona|beloved|tera|meri|humdum|aashiqui|baahon|naina|tere|lover|valentine|melody|melliname|vaseegara|kurumugil|kadhalaada|innum|mayakkama)\b', t):
+    if re.search(r'\b(adiye|adiyae|kadhal\w*|kaadhal\w*|anb\w*|azhag\w*|uyir\w*|kanman\w*|kannam\w*|nenj\w*|kangal\w*|vizhi\w*|kavidha\w*|kavitha\w*|thendral\w*|mazha\w*|poov\w*|malar\w*|unakkul\w*|ennodu\w*|thodu\w*|sidu\w*|thuli\w*|idhazh\w*|premam?\w*|aaradhik\w*|darshan\w*|sneham\w*|priya\w*|swapnam\w*|priyathama\w*|hrudayam\w*|oohalu\w*|inkem\w*|cheliya\w*|undipora\w*|kesariya\w*|tum\w*|ishq\w*|pyaar\w*|dil\w*|mohabbat\w*|humsafar\w*|deewana\w*|saathiya\w*|khairiyat\w*|sukoon\w*|love|romantic|romance|darling|sweetheart|jaan|sanam|baby|kiss|wedding|soulmate|heartbeat|shona|beloved|tera|meri|humdum|aashiqui|baahon|naina|tere|lover|valentine|melody|melliname|vaseegara|kurumugil|kadhalaada|innum|mayakkama|until i found you|wanna be yours|die with a smile|hold me|stay with me|perfect|all of me|falling in love|say you won\'t let go|golden hour|as it was|yellow|forever|with you|only you|rab dikhta|tujh mein|rabba|heer|ranjha|baarish|hawayein|subhanallah|samjhawan|mast magan|bol na halke|tere bina|kasoor|baarishein|choo lo|gehraiyaan)\b', t) or any(k in a for k in ["stephen sanchez", "lauv", "anuv jain", "prateek kuhad", "ali gatie", "james arthur"]):
         return "romantic"
 
     # 5. Chill / Lofi / Calm / Acoustic / Relaxation
@@ -112,7 +112,7 @@ def infer_energy_level(title: str, artist: str = "", genre: str = "", mood: str 
     g = (genre or "").lower()
     m = (mood or infer_mood(title, artist, genre)).lower()
 
-    if m == "energetic" or g in ["phonk", "rock", "edm"] or any(k in t for k in ["rowdy", "remix", "bass", "party", "gym", "fast", "drill", "boost", "kuthu", "kuththu", "gaana", "gana", "blast", "dhol"]) or any(k in a for k in ["gana ", "gaana "]):
+    if m == "energetic" or g in ["phonk", "rock", "edm"] or any(k in t for k in ["rowdy", "remix", "bass", "party", "gym", "fast", "drill", "boost", "kuthu", "kuththu", "gaana", "gana", "blast", "dhol", "chull", "saki", "garmi"]) or any(k in a for k in ["gana ", "gaana ", "badshah", "honey singh", "raftaar"]):
         return "high"
     if m in ["sad", "chill"] or g in ["lofi", "acoustic", "ambient"] or any(k in t for k in ["adiye", "acoustic", "unplugged", "slow", "lofi", "piano", "calm", "melliname", "soft", "jazz", "soul"]):
         return "low"
@@ -569,6 +569,15 @@ async def build_ytmusic_mood_queue(
             resolved_batch = await asyncio.gather(*[_resolve_yt_track(t) for t in tracks[:12]])
             for dyn in resolved_batch:
                 if dyn:
+                    dyn_m = (dyn.get("mood") or "neutral").lower()
+                    if dyn_m in ("neutral", "unknown") and seed_mood not in ("neutral", "unknown"):
+                        dyn_e = (dyn.get("energy_level") or "medium").lower()
+                        if seed_mood in ("romantic", "chill") and dyn_e != "high":
+                            dyn["mood"] = seed_mood
+                        elif seed_mood == "sad" and dyn_e != "high":
+                            dyn["mood"] = seed_mood
+                        elif seed_mood == "energetic" and dyn_e != "low":
+                            dyn["mood"] = seed_mood
                     add_candidate(dyn)
     except Exception as yt_err:
         print(f"Tier 1 (YTMusic watch playlist) notice: {yt_err}")
@@ -666,6 +675,15 @@ async def build_ytmusic_mood_queue(
                     genre = lang if lang in ["tamil", "hindi", "english", "malayalam", "phonk", "telugu"] else "mix"
 
                     feats = infer_song_features(title, artist, genre)
+                    cand_m = feats["mood"]
+                    if cand_m in ("neutral", "unknown") and seed_mood not in ("neutral", "unknown"):
+                        if seed_mood in ("romantic", "chill") and feats["energy_level"] != "high":
+                            cand_m = seed_mood
+                        elif seed_mood == "sad" and feats["energy_level"] != "high":
+                            cand_m = seed_mood
+                        elif seed_mood == "energetic" and feats["energy_level"] != "low":
+                            cand_m = seed_mood
+
                     record = {
                         "title": title,
                         "artist": artist,
@@ -678,7 +696,7 @@ async def build_ytmusic_mood_queue(
                         "source_site": "jiosaavn_cdn",
                         "play_count": 5000,
                         "status": "available",
-                        "mood": feats["mood"],
+                        "mood": cand_m,
                         "energy_level": feats["energy_level"],
                         "vocal_type": feats["vocal_type"],
                     }
@@ -865,14 +883,16 @@ async def build_ytmusic_mood_queue(
             if s_m not in ("romantic", "chill") or s_e == "high":
                 return False
 
-        # If seed is sad: strictly reject energetic or party tracks
+        # If seed is sad / heartbreak: strictly reject upbeat dance, party, or dark tracks
         if seed_mood == "sad":
-            if s_m not in ("sad", "chill") or s_e == "high":
+            if s_m in ("energetic", "dark") or s_e == "high":
                 return False
 
-        # If seed is energetic / dance: strictly reject sad or sleepy acoustic tracks
+        # If seed is energetic / dance: strictly reject slow romantic ballads, sad, or low-energy acoustic tracks
         if seed_mood == "energetic" or seed_energy == "high":
-            if s_m in ("sad", "chill") or s_e == "low":
+            if s_m in ("romantic", "sad", "chill") or s_e == "low":
+                return False
+            if s_m not in ("energetic", "cinematic") and s_e != "high":
                 return False
 
         # If seed is dark: reject light romantic pop

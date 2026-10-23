@@ -17,7 +17,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -1416,8 +1416,27 @@ async def get_radio(
     return result
 
 
+@app.get("/api/radio")
+async def get_radio_query(
+    song_id: Optional[str] = Query(None),
+    seed_id: Optional[str] = Query(None),
+    user_id: str = "guest",
+    limit: int = 15,
+    exclude: str = "",
+    request: Request = None,
+):
+    """Query parameter variant of /api/radio supporting ?song_id= or ?seed_id="""
+    target_id = song_id or seed_id
+    if not target_id:
+        raise HTTPException(status_code=400, detail="Missing required query parameter: 'song_id' or 'seed_id'")
+    return await get_radio(
+        song_id=target_id,
+        user_id=user_id,
+        limit=limit,
+        exclude=exclude,
+        request=request
+    )
 
-# ─── 8. USER MANAGEMENT ───
 @app.post("/api/user")
 async def create_user(user: UserCreate):
     client = get_supabase_client()
