@@ -192,6 +192,18 @@ def similarity_score(seed: dict, candidate: dict) -> float:
     if seed_l and cand_l and seed_l == cand_l:
         score += 0.1
 
+    # Architectural source tier bonus: YouTube Music Up Next (Tier 1) & Saavn Native (Tier 2)
+    # strictly outrank generic static database catalog items
+    tier = candidate.get("tier", 5)
+    if tier == 1:
+        score += 0.35
+    elif tier == 2:
+        score += 0.25
+    elif tier == 4:
+        score += 0.15
+    elif tier == 3:
+        score += 0.05
+
     # Attach features and score to candidate in-place
     candidate["mood"] = cand_m
     candidate["energy_level"] = cand_e
@@ -314,12 +326,12 @@ def apply_energy_arc(songs: list, limit: int = 15) -> list:
         if s:
             arranged.append(s)
 
-    # Positions 10-15: discovery songs
+    # Positions 10-15: discovery & variety songs (prefer high and medium sim if quality is high)
     for _ in range(6):
         if len(arranged) >= limit:
             break
         idx = len(arranged)
-        s = try_pick(discovery, idx) or pick_fallback([medium_sim, high_sim], idx)
+        s = try_pick(high_sim, idx) or try_pick(medium_sim, idx) or try_pick(discovery, idx) or pick_fallback([high_sim, medium_sim, discovery], idx)
         if s:
             arranged.append(s)
 
@@ -545,9 +557,9 @@ async def build_ytmusic_mood_queue(
                 pass
             return []
 
-        tracks = await asyncio.wait_for(asyncio.to_thread(_fetch_yt_playlist), timeout=4.0)
+        tracks = await asyncio.wait_for(asyncio.to_thread(_fetch_yt_playlist), timeout=8.0)
         if tracks:
-            sem = asyncio.Semaphore(8)
+            sem = asyncio.Semaphore(10)
 
             async def _resolve_yt_track(t):
                 t_title = (t.get("title") or "").strip()
@@ -559,16 +571,20 @@ async def build_ytmusic_mood_queue(
                 primary_art = artists[0].get("name", "") if artists else ""
                 if len(clean_t) >= 2:
                     async with sem:
-                        return await fetch_saavn_song_on_the_fly(
+                        res = await fetch_saavn_song_on_the_fly(
                             f"{clean_t} {primary_art}".strip(),
                             client,
                             preferred_genre=seed_genre
                         )
+                        if res:
+                            res["tier"] = 1
+                        return res
                 return None
 
-            resolved_batch = await asyncio.gather(*[_resolve_yt_track(t) for t in tracks[:12]])
+            resolved_batch = await asyncio.gather(*[_resolve_yt_track(t) for t in tracks[:20]])
             for dyn in resolved_batch:
                 if dyn:
+                    dyn["tier"] = 1
                     dyn_m = (dyn.get("mood") or "neutral").lower()
                     if dyn_m in ("neutral", "unknown") and seed_mood not in ("neutral", "unknown"):
                         dyn_e = (dyn.get("energy_level") or "medium").lower()
@@ -743,6 +759,7 @@ async def build_ytmusic_mood_queue(
             print(f"Tier 2 (Saavn native reco) notice: {saavn_err}")
 
     for s in saavn_candidates:
+        s["tier"] = 2
         add_candidate(s)
 
     # ══════════════════════════════════════════════════════════
@@ -754,6 +771,7 @@ async def build_ytmusic_mood_queue(
             cat_q = cat_q.eq("genre", effective_target)
         cat_res = cat_q.order("play_count", desc=True).limit(100).execute()
         for s in (cat_res.data or []):
+            s["tier"] = 3
             s_m = infer_mood(s.get("title", ""), s.get("artist", ""), s.get("genre", ""))
             s_e = infer_energy_level(s.get("title", ""), s.get("artist", ""), s.get("genre", ""), mood=s_m)
             if seed_mood in ("romantic", "chill") or seed_energy == "low":
@@ -801,6 +819,7 @@ async def build_ytmusic_mood_queue(
                     recent_songs = fallback_res.data or []
 
                 for s in recent_songs:
+                    s["tier"] = 4
                     add_candidate(s)
             except Exception as art_err:
                 print(f"Tier 4 (Same artist recent) notice: {art_err}")
@@ -814,6 +833,7 @@ async def build_ytmusic_mood_queue(
             pop_q = pop_q.eq("genre", effective_target)
         pop_res = pop_q.order("play_count", desc=True).limit(100).execute()
         for s in (pop_res.data or []):
+            s["tier"] = 5
             s_m = infer_mood(s.get("title", ""), s.get("artist", ""), s.get("genre", ""))
             s_e = infer_energy_level(s.get("title", ""), s.get("artist", ""), s.get("genre", ""), mood=s_m)
             if seed_mood in ("romantic", "chill") or seed_energy == "low":
@@ -906,14 +926,15 @@ async def build_ytmusic_mood_queue(
             if film_pool_counts.get(film_clean, 0) >= 2:
                 return False
 
-        # Artist diversity: check primary and all co-artists
+        # Artist diversity: check primary and all co-artists (allow up to 3 per artist in queue)
+        all_art_names = set()
         art = get_primary_artist(s)
-        if art and artist_pool_counts.get(art, 0) >= 2:
+        if art:
+            all_art_names.add(art)
+        for a_name in [a.strip().lower() for a in re.split(r"[,&|]|\sfeat\.?|\sft\.?", s.get("artist") or "", flags=re.I) if len(a.strip()) >= 3]:
+            all_art_names.add(a_name)
+        if any(artist_pool_counts.get(a_name, 0) >= 3 for a_name in all_art_names):
             return False
-        raw_artists = [a.strip().lower() for a in re.split(r"[,&|]|\sfeat\.?|\sft\.?", s.get("artist") or "", flags=re.I) if len(a.strip()) >= 3]
-        for a_name in raw_artists:
-            if artist_pool_counts.get(a_name, 0) >= 2:
-                return False
 
         return True
 
@@ -925,11 +946,13 @@ async def build_ytmusic_mood_queue(
             seen_ids.add(sid)
             if canon:
                 seen_titles.add(canon)
+            all_art_names = set()
             art = get_primary_artist(s)
             if art:
-                artist_pool_counts[art] = artist_pool_counts.get(art, 0) + 1
-            raw_artists = [a.strip().lower() for a in re.split(r"[,&|]|\sfeat\.?|\sft\.?", s.get("artist") or "", flags=re.I) if len(a.strip()) >= 3]
-            for a_name in raw_artists:
+                all_art_names.add(art)
+            for a_name in [a.strip().lower() for a in re.split(r"[,&|]|\sfeat\.?|\sft\.?", s.get("artist") or "", flags=re.I) if len(a.strip()) >= 3]:
+                all_art_names.add(a_name)
+            for a_name in all_art_names:
                 artist_pool_counts[a_name] = artist_pool_counts.get(a_name, 0) + 1
             film_clean = (s.get("film") or "").strip().lower()
             if film_clean and film_clean not in ("single", "album", "unknown", ""):

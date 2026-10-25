@@ -547,7 +547,10 @@ def normalize_phonetic(text: str) -> str:
     return t
 
 
-SEARCH_STOP_WORDS = {"movie", "film", "song", "songs", "track", "tracks", "audio", "video", "full"}
+SEARCH_STOP_WORDS = {
+    "movie", "film", "song", "songs", "track", "tracks", 
+    "audio", "video", "full", "from", "in", "the", "of", "by", "official"
+}
 
 
 def strip_search_stopwords(q: str) -> str:
@@ -684,6 +687,7 @@ async def fetch_dynamic_search_songs(query: str, client: Client, limit: int = 10
                 genre = raw_lang if raw_lang in ["tamil", "hindi", "english", "malayalam", "phonk", "telugu"] else "mix"
                 dur = int(item.get("duration") or 180)
 
+                feats = infer_song_features(title, artist, genre)
                 rec = {
                     "title": title,
                     "artist": artist,
@@ -696,6 +700,9 @@ async def fetch_dynamic_search_songs(query: str, client: Client, limit: int = 10
                     "source_site": "jiosaavn_cdn",
                     "play_count": 6000,
                     "status": "available",
+                    "mood": feats["mood"],
+                    "energy_level": feats["energy_level"],
+                    "vocal_type": feats["vocal_type"],
                 }
                 records.append(rec)
 
@@ -705,6 +712,15 @@ async def fetch_dynamic_search_songs(query: str, client: Client, limit: int = 10
                     if res.data:
                         return res.data
                 except Exception as ins_err:
+                    err_str = str(ins_err)
+                    if "column" in err_str.lower() or "schema cache" in err_str.lower() or "42703" in err_str or "PGRST204" in err_str:
+                        fb_records = [{k: v for k, v in r.items() if k not in ("mood", "energy_level", "vocal_type")} for r in records]
+                        try:
+                            res = client.table("songs").upsert(fb_records, on_conflict="source_url").execute()
+                            if res.data:
+                                return res.data
+                        except Exception:
+                            pass
                     print(f"Dynamic search upsert error: {ins_err}")
     except Exception as e:
         print(f"Dynamic search notice: {e}")
@@ -784,6 +800,16 @@ async def search_songs(
         if len(suffix_title) >= 3:
             direct_queries.append(suffix_title)
 
+    # If query contains 'from' (e.g. 'veezha veera from OM'), extract title & film
+    title_from_part = ""
+    film_from_part = ""
+    if " from " in clean_q:
+        t_split, _, f_split = clean_q.partition(" from ")
+        title_from_part = t_split.strip()
+        film_from_part = f_split.strip()
+        if len(title_from_part) >= 2:
+            direct_queries.append(title_from_part)
+
     for dq in direct_queries:
         try:
             title_res = client.table("songs")\
@@ -802,6 +828,8 @@ async def search_songs(
 
     # For movie titles or film name searches, also query film field and 'From ...' title patterns
     film_terms = [core_q] if core_q and len(core_q) >= 2 else ([clean_q] if len(clean_q) >= 2 else [])
+    if film_from_part and len(film_from_part) >= 2:
+        film_terms.append(film_from_part)
     for fq in film_terms:
         try:
             film_res = client.table("songs")\
@@ -967,6 +995,8 @@ async def search_songs(
             dynamic_songs = await fetch_dynamic_search_songs(clean_q, client, limit=limit)
             if not dynamic_songs and core_q != clean_q and len(core_q) >= 2:
                 dynamic_songs = await fetch_dynamic_search_songs(core_q, client, limit=limit)
+            if not dynamic_songs and title_from_part and len(title_from_part) >= 2:
+                dynamic_songs = await fetch_dynamic_search_songs(title_from_part, client, limit=limit)
             for s in dynamic_songs:
                 if s["id"] not in seen_ids:
                     seen_ids.add(s["id"])
