@@ -545,16 +545,20 @@ async def build_ytmusic_mood_queue(
         def _fetch_yt_playlist():
             try:
                 yt = YTMusic()
-                query = f"{seed_title} {seed_artist}".strip()
+                clean_seed_t = re.sub(r'\(.*?\)|\[.*?\]', '', seed_title).strip()
+                prim_art = get_primary_artist(seed_song) or seed_artist
+                query = f"{clean_seed_t} {prim_art}".strip()
                 search_res = yt.search(query, filter="songs")
                 if not search_res:
-                    search_res = yt.search(seed_title, filter="songs")
+                    search_res = yt.search(clean_seed_t, filter="songs")
+                if not search_res:
+                    search_res = yt.search(f"{seed_title} {seed_artist}".strip(), filter="songs")
                 if search_res and "videoId" in search_res[0]:
                     vid = search_res[0]["videoId"]
-                    wp = yt.get_watch_playlist(videoId=vid, radio=True, limit=25)
+                    wp = yt.get_watch_playlist(videoId=vid, radio=True, limit=35)
                     return wp.get("tracks", [])
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"YT playlist inner error: {e}")
             return []
 
         tracks = await asyncio.wait_for(asyncio.to_thread(_fetch_yt_playlist), timeout=8.0)
@@ -637,28 +641,46 @@ async def build_ytmusic_mood_queue(
                         break
 
                 if len(raw_recos) < limit:
+                    film_clean = re.sub(r'\(.*?\)|\[.*?\]', '', seed_song.get("film") or "").replace("Single", "").strip()
+                    if film_clean.lower().startswith("from "):
+                        film_clean = film_clean[5:].strip()
+
+                    search_queries = []
+                    if film_clean and len(film_clean) >= 3 and film_clean.lower() not in ("album", "single", "unknown"):
+                        search_queries.append(f"{film_clean} {seed_lang}".strip() if seed_lang in REGIONAL_LANGS else film_clean)
+
+                    primary_art = get_primary_artist(seed_song) or ""
+                    if primary_art and len(primary_art) >= 3 and primary_art.lower() not in ("various", "unknown"):
+                        search_queries.append(f"{primary_art} songs")
+
                     if seed_genre == "phonk":
-                        fb_q = "drift phonk"
+                        search_queries.append("drift phonk")
                     elif seed_lang in REGIONAL_LANGS:
                         if seed_mood in ("romantic", "chill") or seed_energy == "low":
-                            fb_q = f"{seed_lang} love melody hits"
+                            search_queries.append(f"{seed_lang} love melody hits")
                         elif seed_mood == "sad":
-                            fb_q = f"{seed_lang} sad melody songs"
+                            search_queries.append(f"{seed_lang} sad melody songs")
                         elif seed_mood == "energetic" or seed_energy == "high":
-                            fb_q = f"{seed_lang} dance party hits"
+                            search_queries.append(f"{seed_lang} dance party hits")
+                        elif seed_mood == "dark":
+                            search_queries.append(f"{seed_lang} mass action theme")
                         else:
-                            fb_q = f"{seed_lang} hits"
+                            search_queries.append(f"latest {seed_lang} hits")
                     elif effective_target and effective_target != "mix":
-                        fb_q = f"{effective_target} hits"
+                        search_queries.append(f"latest {effective_target} hits")
                     else:
-                        fb_q = f"{seed_artist} songs" if seed_artist else "trending songs"
+                        search_queries.append(f"{seed_artist} songs" if seed_artist else "trending songs")
 
-                    try:
-                        fb_url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&n=20&p=1&q={quote(fb_q)}"
-                        fr = await hclient.get(fb_url)
-                        raw_recos.extend(fr.json().get("results", []) if fr.status_code == 200 else [])
-                    except Exception:
-                        pass
+                    for sq in search_queries:
+                        try:
+                            fb_url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&n=15&p=1&q={quote(sq)}"
+                            fr = await hclient.get(fb_url)
+                            if fr.status_code == 200:
+                                raw_recos.extend(fr.json().get("results", []) or [])
+                        except Exception:
+                            pass
+                        if len(raw_recos) >= limit * 2:
+                            break
 
                 ingested = []
                 for item in raw_recos:
