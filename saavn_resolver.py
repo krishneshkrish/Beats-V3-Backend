@@ -563,7 +563,7 @@ async def build_ytmusic_mood_queue(
 
         tracks = await asyncio.wait_for(asyncio.to_thread(_fetch_yt_playlist), timeout=8.0)
         if tracks:
-            sem = asyncio.Semaphore(10)
+            sem = asyncio.Semaphore(12)
 
             async def _resolve_yt_track(t):
                 t_title = (t.get("title") or "").strip()
@@ -585,7 +585,7 @@ async def build_ytmusic_mood_queue(
                         return res
                 return None
 
-            resolved_batch = await asyncio.gather(*[_resolve_yt_track(t) for t in tracks[:20]])
+            resolved_batch = await asyncio.gather(*[_resolve_yt_track(t) for t in tracks[:32]])
             for dyn in resolved_batch:
                 if dyn:
                     dyn["tier"] = 1
@@ -791,7 +791,7 @@ async def build_ytmusic_mood_queue(
         cat_q = client.table("songs").select("*").eq("status", "available")
         if effective_target and effective_target != "mix":
             cat_q = cat_q.eq("genre", effective_target)
-        cat_res = cat_q.order("play_count", desc=True).limit(100).execute()
+        cat_res = cat_q.order("scraped_at", desc=True).limit(60).execute()
         for s in (cat_res.data or []):
             s["tier"] = 3
             s_m = infer_mood(s.get("title", ""), s.get("artist", ""), s.get("genre", ""))
@@ -830,7 +830,7 @@ async def build_ytmusic_mood_queue(
                 # Prioritize recent songs with year >= cutoff_year
                 recent_songs = []
                 try:
-                    recent_res = art_q.gte("year", cutoff_year).order("play_count", desc=True).limit(20).execute()
+                    recent_res = art_q.gte("year", cutoff_year).order("scraped_at", desc=True).limit(20).execute()
                     recent_songs = recent_res.data or []
                 except Exception:
                     recent_songs = []
@@ -853,7 +853,7 @@ async def build_ytmusic_mood_queue(
         pop_q = client.table("songs").select("*").eq("status", "available")
         if effective_target and effective_target != "mix":
             pop_q = pop_q.eq("genre", effective_target)
-        pop_res = pop_q.order("play_count", desc=True).limit(100).execute()
+        pop_res = pop_q.order("scraped_at", desc=True).limit(60).execute()
         for s in (pop_res.data or []):
             s["tier"] = 5
             s_m = infer_mood(s.get("title", ""), s.get("artist", ""), s.get("genre", ""))
