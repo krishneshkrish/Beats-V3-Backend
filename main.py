@@ -1736,6 +1736,69 @@ async def get_trending(
     return {"songs": trending_songs[:limit], "source": "dynamic_velocity"}
 
 
+# ─── STREAM RESOLVER ENDPOINT (Direct CDN Resolution for Frontend) ───
+@app.get("/api/resolve/{song_id}")
+async def resolve_song_endpoint(song_id: str, request: Request):
+    """
+    Direct stream resolution endpoint for frontend player.
+    Resolves song to its highest quality direct CDN stream URL (320kbps) with zero proxy overhead.
+    """
+    r = getattr(request.app.state, "redis", None)
+    client = get_supabase_client()
+    song_id = TEMPLATE_SONG_MAP.get(song_id, song_id)
+    cache_key = f"beats:resolve:{song_id}"
+    real_url = await r.get(cache_key) if r else None
+
+    song_meta = {}
+    if is_valid_uuid(song_id):
+        try:
+            res = client.table("songs").select("id, title, artist, source_url").eq("id", song_id).execute()
+            if res.data:
+                song_meta = res.data[0]
+                if not real_url and song_meta.get("source_url"):
+                    real_url = song_meta["source_url"]
+        except Exception:
+            pass
+
+    if not real_url:
+        clean_q = song_id.replace("song-", "").replace("-", " ").strip()
+        try:
+            res = client.table("songs").select("id, title, artist, source_url").ilike("title", f"%{clean_q}%").limit(1).execute()
+            if res.data:
+                song_meta = res.data[0]
+                if song_meta.get("source_url"):
+                    real_url = song_meta["source_url"]
+        except Exception:
+            pass
+
+    if not real_url:
+        clean_term = song_id.replace("song-", "").replace("-", " ").strip()
+        fresh_rec = await fetch_saavn_song_on_the_fly(clean_term, client)
+        if fresh_rec and fresh_rec.get("source_url"):
+            real_url = fresh_rec["source_url"]
+            song_meta = fresh_rec
+
+    if not real_url:
+        raise HTTPException(404, "Song source not found")
+
+    if r and real_url:
+        try:
+            await r.set(cache_key, real_url, ex=72000)
+        except Exception:
+            pass
+
+    # For direct Saavn CDN, return direct URL so frontend streams with zero proxy latency
+    stream_url = real_url if "saavncdn.com" in real_url else f"/api/stream/{song_id}"
+
+    return {
+        "song_id": song_id,
+        "stream_url": stream_url,
+        "direct_url": real_url,
+        "title": song_meta.get("title", ""),
+        "artist": song_meta.get("artist", "")
+    }
+
+
 # ─── STREAM PROXY WITH RANGE SUPPORT (Fixes Masstamilan 403 & CORS) ───
 @app.get("/api/stream/{song_id}")
 async def stream_song(song_id: str, request: Request):
