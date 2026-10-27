@@ -117,6 +117,14 @@ async def warmup_catalog_cache(app: FastAPI):
         if res_cat.data:
             await r.set("beats:catalog:light", json.dumps(res_cat.data), ex=600)
 
+        # 4. Verify ML recommender model presence in Redis
+        model_exists = await r.exists("beats:model:rec")
+        if not model_exists:
+            print("[i] 'beats:model:rec' not found in Redis, triggering background retrain...")
+            loop = asyncio.get_event_loop()
+            from jobs.retrain import run as retrain_run
+            loop.run_in_executor(None, retrain_run)
+
         print("[OK] Catalog cache warmup complete: Zero-delay startup active")
     except Exception as e:
         print(f"[!] Warmup notice: {e}")

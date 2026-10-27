@@ -204,8 +204,8 @@ def run():
         joblib.dump(model_payload, buffer)
         model_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
 
-        r.set("beats:model:rec", model_b64, ex=90000)
-        print("[OK] Serialized model stored in Redis key 'beats:model:rec' (TTL 25 hours).")
+        r.set("beats:model:rec", model_b64)
+        print("[OK] Serialized model stored permanently in Redis key 'beats:model:rec'.")
     except Exception as e:
         print(f"[!] Warning: Failed to save model to Redis: {e}")
 
