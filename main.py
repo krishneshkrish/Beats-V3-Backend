@@ -25,6 +25,7 @@ import redis.asyncio as aioredis
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import pytz
+from saavn_resolver import infer_song_features
 
 load_dotenv()
 
@@ -821,7 +822,7 @@ async def search_songs(
     for dq in direct_queries:
         try:
             title_res = client.table("songs")\
-                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status, source_url")\
+                .select("id, title, artist, film, genre, language, duration, thumbnail_url, play_count, status, source_url")\
                 .eq("status", "available")\
                 .ilike("title", f"%{dq}%")\
                 .order("play_count", desc=True)\
@@ -841,7 +842,7 @@ async def search_songs(
     for fq in film_terms:
         try:
             film_res = client.table("songs")\
-                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status, source_url")\
+                .select("id, title, artist, film, genre, language, duration, thumbnail_url, play_count, status, source_url")\
                 .eq("status", "available")\
                 .ilike("film", f"%{fq}%")\
                 .order("play_count", desc=True)\
@@ -856,7 +857,7 @@ async def search_songs(
 
         try:
             from_res = client.table("songs")\
-                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status, source_url")\
+                .select("id, title, artist, film, genre, language, duration, thumbnail_url, play_count, status, source_url")\
                 .eq("status", "available")\
                 .ilike("title", f"%from %{fq}%")\
                 .order("play_count", desc=True)\
@@ -884,7 +885,7 @@ async def search_songs(
     try:
         res = client.table("songs")\
             .select(
-                "id, title, artist, film, genre, "
+                "id, title, artist, film, genre, language, "
                 "duration, thumbnail_url, play_count, status, source_url"
             )\
             .eq("status", "available")\
@@ -907,7 +908,7 @@ async def search_songs(
     if len(effective_words) > 1 and len(songs_data) < candidate_limit:
         try:
             query_words = client.table("songs")\
-                .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
+                .select("id, title, artist, film, genre, language, duration, thumbnail_url, play_count, status")\
                 .eq("status", "available")
 
             for term in effective_words[:3]:
@@ -945,7 +946,7 @@ async def search_songs(
 
             if not catalog:
                 all_res = client.table("songs")\
-                    .select("id, title, artist, film, genre, duration, thumbnail_url, play_count, status")\
+                    .select("id, title, artist, film, genre, language, duration, thumbnail_url, play_count, status")\
                     .eq("status", "available")\
                     .execute()
                 catalog = all_res.data or []
@@ -1084,6 +1085,15 @@ async def search_songs(
         return (score, p_count)
 
     songs_data.sort(key=compute_relevance, reverse=True)
+
+    from saavn_resolver import normalize_language, detect_song_language
+    for s in songs_data[:limit]:
+        raw_l = normalize_language(s.get("language"))
+        if not raw_l or raw_l in ("mix", "unknown"):
+            det = detect_song_language(s)
+            s["language"] = det.capitalize() if det != "mix" else s.get("genre", "Tamil").capitalize()
+        else:
+            s["language"] = raw_l.capitalize()
 
     result = {
         "songs": songs_data[:limit],
@@ -1372,6 +1382,8 @@ async def get_radio(
     user_id: str = "guest",
     limit: int = 15,
     exclude: str = "",
+    language: Optional[str] = Query(None),
+    genre: Optional[str] = Query(None),
     request: Request = None,
 ):
     """
@@ -1384,6 +1396,7 @@ async def get_radio(
     now = datetime.now(IST)
 
     from recommender import radio_recs, get_time_block
+    from saavn_resolver import normalize_language, detect_song_language
     time_block = get_time_block(now.hour)
 
     actual_song_id = TEMPLATE_SONG_MAP.get(song_id, song_id)
@@ -1413,8 +1426,21 @@ async def get_radio(
         except Exception as se_err:
             print(f"Session history read error: {se_err}")
 
-    # Radio response cache check (fast 5ms return for identical seeds)
-    radio_cache_key = f"beats:radio:{actual_song_id}:{actual_user_id}:{limit}"
+    # Determine linguistic target with precision
+    target_lang = normalize_language(language) or normalize_language(genre) or ""
+    if not target_lang or target_lang in ("mix", "unknown"):
+        if is_valid_uuid(actual_song_id):
+            try:
+                s_check = client.table("songs").select("genre, language, title, artist, film").eq("id", actual_song_id).limit(1).execute()
+                if s_check.data:
+                    target_lang = detect_song_language(s_check.data[0])
+            except Exception:
+                pass
+
+    effective_target_lang = normalize_language(target_lang) or "mix"
+
+    # Radio response cache check (fast 5ms return for identical seeds and language)
+    radio_cache_key = f"beats:radio:{actual_song_id}:{effective_target_lang}:{actual_user_id}:{limit}"
     if r and not exclude_ids:
         try:
             cached_radio = await r.get(radio_cache_key)
@@ -1431,12 +1457,27 @@ async def get_radio(
             supabase=client,
             redis=r,
             exclude_ids=exclude_ids,
-            now=now
+            now=now,
+            target_language=effective_target_lang if effective_target_lang != "mix" else None,
         )
     except Exception as e:
         print(f"Radio generation error: {e}")
-        from recommender import rule_based_recs
-        songs = await rule_based_recs(actual_user_id, limit, client, r, now)
+        songs = []
+        if effective_target_lang and effective_target_lang != "mix":
+            try:
+                fb_q = client.table("songs")\
+                    .select("*")\
+                    .eq("status", "available")\
+                    .or_(f"genre.eq.{effective_target_lang},language.ilike.{effective_target_lang}")\
+                    .order("play_count", desc=True)\
+                    .limit(limit * 2)
+                fb_res = fb_q.execute()
+                songs = [s for s in (fb_res.data or []) if s.get("id") not in exclude_ids][:limit]
+            except Exception as fb_err:
+                print(f"Radio language fallback error: {fb_err}")
+        if not songs:
+            from recommender import rule_based_recs
+            songs = await rule_based_recs(actual_user_id, limit, client, r, now)
 
     result = {
         "seed_id": song_id,
@@ -1461,6 +1502,8 @@ async def get_radio_query(
     user_id: str = "guest",
     limit: int = 15,
     exclude: str = "",
+    language: Optional[str] = Query(None),
+    genre: Optional[str] = Query(None),
     request: Request = None,
 ):
     """Query parameter variant of /api/radio supporting ?song_id= or ?seed_id="""
@@ -1472,6 +1515,8 @@ async def get_radio_query(
         user_id=user_id,
         limit=limit,
         exclude=exclude,
+        language=language,
+        genre=genre,
         request=request
     )
 

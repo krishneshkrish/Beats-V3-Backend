@@ -56,6 +56,85 @@ def get_primary_artist(song: dict) -> str:
     art = song.get("artist") or ""
     return re.split(r"[,&|]|\sfeat\.?|\sft\.?", art, flags=re.I)[0].strip().lower()
 
+REGIONAL_LANGS = {"hindi", "tamil", "malayalam", "telugu", "kannada", "bengali", "punjabi", "english", "phonk"}
+
+def normalize_language(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    v = str(val).strip().lower()
+    mapping = {
+        "malayalam": "malayalam",
+        "tamil": "tamil",
+        "hindi": "hindi",
+        "telugu": "telugu",
+        "kannada": "kannada",
+        "punjabi": "punjabi",
+        "bengali": "bengali",
+        "english": "english",
+        "phonk": "phonk",
+    }
+    return mapping.get(v, v)
+
+def detect_song_language(song: dict) -> str:
+    """
+    Infers song language by analyzing explicit language, genre, artist, and title/album markers.
+    """
+    if not song:
+        return "mix"
+    raw_l = normalize_language(song.get("language"))
+    if raw_l and raw_l not in ("mix", "unknown", "instrumental"):
+        return raw_l
+    raw_g = normalize_language(song.get("genre"))
+    if raw_g and raw_g not in ("mix", "unknown", "instrumental"):
+        return raw_g
+
+    t = (song.get("title") or "").lower()
+    f = (song.get("film") or "").lower()
+    a = (song.get("artist") or "").lower()
+    comb = f"{t} {f} {a}"
+
+    malayalam_keywords = [
+        "karmukilil", "kaarmukilil", "rahul raj", "gopi sundar", "gopi sunder", "vineeth sreenivasan",
+        "sushin shyam", "shaan rahman", "jakes bejoy", "vishnu vijay", "hesham abdul wahab", "rex vijayan",
+        "bijibal", "job kurian", "k.s. harisankar", "ks harisankar", "sujatha mohan", "m.g. sreekumar",
+        "mg sreekumar", "k.j. yesudas", "kj yesudas", "vijay yesudas", "unni menon", "p. jayachandran",
+        "p jayachandran", "sithara krishnakumar", "neha nair", "rafeeq ahamed", "rafeeq ahammed",
+        "manu manjith", "vinayak sasikumar", "bachelor party", "premam", "aavesham", "hridhyam",
+        "hridayam", "kumbalangi", "manjummel", "bheeshma parvam", "minnal murali", "lucifer",
+        "charlie", "ezra", "thattathin marayathe", "btech", "anju sundarikal", "narivetta"
+    ]
+    for mk in malayalam_keywords:
+        if mk in comb:
+            return "malayalam"
+
+    tamil_keywords = [
+        "anirudh", "ar rahman", "a.r. rahman", "yuvan shankar", "yuvan", "harris jayaraj",
+        "ilayaraja", "ilayaraaja", "d. imman", "d imman", "santhosh narayanan", "sid sriram",
+        "dhibu ninan", "hiphop tamizha", "g.v. prakash", "gv prakash", "jailer", "leo", "vikram",
+        "ghilli", "master", "kaithi", "rathinamo", "putaapu", "masstamilan"
+    ]
+    for tk in tamil_keywords:
+        if tk in comb:
+            return "tamil"
+
+    hindi_keywords = [
+        "arijit singh", "pritam", "badshah", "neha kakkar", "vishal-shekhar", "atif aslam",
+        "amit trivedi", "jubin nautiyal", "sachet tandon", "darshan raval", "armaan malik"
+    ]
+    for hk in hindi_keywords:
+        if hk in comb:
+            return "hindi"
+
+    telugu_keywords = [
+        "thaman", "devi sri prasad", "dsp", "ram miriyala", "anurag kulkarni", "geetha govindam",
+        "pushpa", "ala vaikunthapurramuloo"
+    ]
+    for telk in telugu_keywords:
+        if telk in comb:
+            return "telugu"
+
+    return "mix"
+
 # ─── SONG FEATURES INFERENCE ───
 
 def infer_mood(title: str, artist: str = "", genre: str = "") -> str:
@@ -179,8 +258,8 @@ def similarity_score(seed: dict, candidate: dict) -> float:
     seed_v = (seed.get("vocal_type") or infer_vocal_type(seed_t, seed_a)).strip().lower()
     cand_v = (candidate.get("vocal_type") or infer_vocal_type(cand_t, cand_a)).strip().lower()
 
-    seed_l = (seed.get("language") or seed_g or "").strip().lower()
-    cand_l = (candidate.get("language") or cand_g or "").strip().lower()
+    seed_l = normalize_language(seed.get("language") or seed_g)
+    cand_l = normalize_language(candidate.get("language") or cand_g)
 
     score = 0.0
     if seed_m and cand_m and seed_m == cand_m:
@@ -190,7 +269,9 @@ def similarity_score(seed: dict, candidate: dict) -> float:
     if seed_v and cand_v and seed_v == cand_v:
         score += 0.2
     if seed_l and cand_l and seed_l == cand_l:
-        score += 0.1
+        score += 0.3
+    elif seed_l and cand_l and seed_l in REGIONAL_LANGS and cand_l in REGIONAL_LANGS and seed_l != cand_l:
+        score -= 1.0
 
     # Architectural source tier bonus: YouTube Music Up Next (Tier 1) & Saavn Native (Tier 2)
     # strictly outrank generic static database catalog items
@@ -363,12 +444,18 @@ async def fetch_saavn_song_on_the_fly(query: str, client: Client, preferred_genr
 
             top = results[0]
             if preferred_genre and preferred_genre != "mix":
-                target_g = preferred_genre.strip().lower()
+                target_g = normalize_language(preferred_genre)
+                matched_item = None
                 for item in results:
-                    item_lang = (item.get("language") or "").strip().lower()
+                    item_lang = normalize_language(item.get("language"))
                     if item_lang == target_g:
-                        top = item
+                        matched_item = item
                         break
+                if matched_item:
+                    top = matched_item
+                elif target_g in REGIONAL_LANGS:
+                    # Strict linguistic filter: reject cross-lingual mismatch
+                    return None
 
             enc = top.get("encrypted_media_url")
             if not enc:
@@ -381,9 +468,9 @@ async def fetch_saavn_song_on_the_fly(query: str, client: Client, preferred_genr
             raw_film = html.unescape(top.get("album") or "")
             film = raw_film.replace("&quot;", '"').replace("&#039;", "'").strip()
             thumb = (top.get("image") or "").replace("150x150", "500x500")
-            raw_lang = (top.get("language") or "").strip().lower()
-            lang = raw_lang.capitalize() if raw_lang else (preferred_genre.capitalize() if preferred_genre else "Tamil")
-            genre = raw_lang if raw_lang in ["tamil", "hindi", "english", "malayalam", "phonk", "telugu"] else (preferred_genre.lower() if preferred_genre else "mix")
+            raw_lang = normalize_language(top.get("language"))
+            lang = raw_lang.capitalize() if raw_lang else (preferred_genre.capitalize() if preferred_genre else "Malayalam")
+            genre = raw_lang if raw_lang in ["tamil", "hindi", "english", "malayalam", "phonk", "telugu"] else (normalize_language(preferred_genre) if preferred_genre else "mix")
             
             feats = infer_song_features(title, artist, genre)
             record = {
@@ -447,6 +534,7 @@ async def build_ytmusic_mood_queue(
     redis = None,
     exclude_ids: List[str] = None,
     user_id: str = "guest",
+    target_language: Optional[str] = None,
 ) -> List[dict]:
     """
     Builds the Up Next queue matching the exact musical mood of the seed song.
@@ -458,16 +546,23 @@ async def build_ytmusic_mood_queue(
       5. Genre trending (last resort)
     
     Scores all candidates with similarity_score(), sorts by score,
-    filters with anti-fatigue & linguistic constraints, and arranges via apply_energy_arc().
+    filters with anti-fatigue & strict linguistic constraints, and arranges via apply_energy_arc().
     """
-    REGIONAL_LANGS = {"hindi", "tamil", "malayalam", "telugu", "kannada", "bengali", "punjabi"}
-
     seed_id = str(seed_song.get("id", ""))
     seed_title = (seed_song.get("title") or "").strip()
     seed_artist = (seed_song.get("artist") or "").strip()
-    seed_genre = (seed_song.get("genre") or "mix").strip().lower()
-    seed_lang = (seed_song.get("language") or seed_genre or "mix").strip().lower()
-    effective_target = seed_lang if seed_lang in REGIONAL_LANGS else seed_genre
+    seed_genre = normalize_language(seed_song.get("genre")) or "mix"
+    raw_lang = normalize_language(seed_song.get("language")) or ""
+
+    seed_lang = normalize_language(target_language) if target_language else ""
+    if not seed_lang or seed_lang in ("mix", "unknown"):
+        seed_lang = raw_lang
+    if not seed_lang or seed_lang in ("mix", "unknown"):
+        seed_lang = seed_genre
+    if not seed_lang or seed_lang in ("mix", "unknown"):
+        seed_lang = detect_song_language(seed_song)
+
+    effective_target = seed_lang if seed_lang in REGIONAL_LANGS and seed_lang != "mix" else (seed_genre if seed_genre in REGIONAL_LANGS else "mix")
 
     # Ensure seed song has feature fields accurately populated
     seed_feats = infer_song_features(seed_title, seed_artist, seed_genre)
@@ -563,7 +658,7 @@ async def build_ytmusic_mood_queue(
 
         tracks = await asyncio.wait_for(asyncio.to_thread(_fetch_yt_playlist), timeout=8.0)
         if tracks:
-            sem = asyncio.Semaphore(12)
+            sem = asyncio.Semaphore(10)
 
             async def _resolve_yt_track(t):
                 t_title = (t.get("title") or "").strip()
@@ -574,18 +669,33 @@ async def build_ytmusic_mood_queue(
                 artists = t.get("artists", [])
                 primary_art = artists[0].get("name", "") if artists else ""
                 if len(clean_t) >= 2:
+                    # 1. Fast local catalog lookup first (10-20ms)
+                    try:
+                        clean_base = re.sub(r'\(.*?\)|\[.*?\]', '', clean_t).strip()
+                        c_q = client.table("songs").select("*").eq("status", "available").ilike("title", f"%{clean_base}%")
+                        if effective_target and effective_target != "mix":
+                            c_q = c_q.or_(f"genre.eq.{effective_target},language.ilike.{effective_target}")
+                        c_res = c_q.limit(1).execute()
+                        if c_res.data:
+                            found_s = c_res.data[0]
+                            found_s["tier"] = 1
+                            return found_s
+                    except Exception:
+                        pass
+
+                    # 2. Dynamic fetch from JioSaavn with preferred_genre constraint
                     async with sem:
                         res = await fetch_saavn_song_on_the_fly(
                             f"{clean_t} {primary_art}".strip(),
                             client,
-                            preferred_genre=seed_genre
+                            preferred_genre=effective_target if effective_target != "mix" else seed_genre
                         )
                         if res:
                             res["tier"] = 1
                         return res
                 return None
 
-            resolved_batch = await asyncio.gather(*[_resolve_yt_track(t) for t in tracks[:32]])
+            resolved_batch = await asyncio.gather(*[_resolve_yt_track(t) for t in tracks[:16]])
             for dyn in resolved_batch:
                 if dyn:
                     dyn["tier"] = 1
@@ -790,8 +900,8 @@ async def build_ytmusic_mood_queue(
     try:
         cat_q = client.table("songs").select("*").eq("status", "available")
         if effective_target and effective_target != "mix":
-            cat_q = cat_q.eq("genre", effective_target)
-        cat_res = cat_q.order("scraped_at", desc=True).limit(60).execute()
+            cat_q = cat_q.or_(f"genre.eq.{effective_target},language.ilike.{effective_target}")
+        cat_res = cat_q.order("play_count", desc=True).limit(60).execute()
         for s in (cat_res.data or []):
             s["tier"] = 3
             s_m = infer_mood(s.get("title", ""), s.get("artist", ""), s.get("genre", ""))
@@ -825,7 +935,7 @@ async def build_ytmusic_mood_queue(
                     .eq("status", "available")\
                     .ilike("artist", f"%{primary_artist}%")
                 if effective_target and effective_target != "mix":
-                    art_q = art_q.eq("genre", effective_target)
+                    art_q = art_q.or_(f"genre.eq.{effective_target},language.ilike.{effective_target}")
 
                 # Prioritize recent songs with year >= cutoff_year
                 recent_songs = []
@@ -852,8 +962,8 @@ async def build_ytmusic_mood_queue(
     try:
         pop_q = client.table("songs").select("*").eq("status", "available")
         if effective_target and effective_target != "mix":
-            pop_q = pop_q.eq("genre", effective_target)
-        pop_res = pop_q.order("scraped_at", desc=True).limit(60).execute()
+            pop_q = pop_q.or_(f"genre.eq.{effective_target},language.ilike.{effective_target}")
+        pop_res = pop_q.order("play_count", desc=True).limit(60).execute()
         for s in (pop_res.data or []):
             s["tier"] = 5
             s_m = infer_mood(s.get("title", ""), s.get("artist", ""), s.get("genre", ""))
@@ -891,21 +1001,26 @@ async def build_ytmusic_mood_queue(
         canon = get_canonical_title(s.get("title", ""))
         if not canon or canon in seen_titles:
             return False
-        g = (s.get("genre") or "mix").strip().lower()
-        if effective_target and effective_target != "mix" and g != effective_target:
-            return False
 
         # Strict linguistic integrity
-        s_lang = (s.get("language") or g or "").strip().lower()
+        s_g = normalize_language(s.get("genre"))
+        s_l = normalize_language(s.get("language"))
         s_title = (s.get("title") or "").strip()
         s_film = (s.get("film") or "").strip()
 
-        if seed_lang in REGIONAL_LANGS:
-            if s_lang in REGIONAL_LANGS and s_lang != seed_lang:
+        cand_lang = s_l if (s_l and s_l not in ("mix", "unknown", "instrumental")) else s_g
+
+        if effective_target and effective_target not in ("mix", "unknown"):
+            # 1. Candidate language must match effective target
+            if cand_lang and cand_lang not in ("mix", "unknown") and cand_lang != effective_target:
                 return False
-            if g in REGIONAL_LANGS and g != seed_lang:
+            # 2. Candidate genre must not conflict with effective target
+            if s_g in REGIONAL_LANGS and s_g != effective_target:
                 return False
-            other_langs = REGIONAL_LANGS - {seed_lang}
+            if s_l in REGIONAL_LANGS and s_l != effective_target:
+                return False
+            # 3. Check for other language mentions in title/film
+            other_langs = REGIONAL_LANGS - {effective_target}
             pattern = r'\b(' + '|'.join(other_langs) + r')\b'
             if re.search(pattern, s_title, re.I) or re.search(pattern, s_film, re.I):
                 return False
@@ -981,6 +1096,29 @@ async def build_ytmusic_mood_queue(
                 film_pool_counts[film_clean] = film_pool_counts.get(film_clean, 0) + 1
             qualified_songs.append(s)
 
+    # 4. Guaranteed linguistic backfill if candidates pool was tight
+    if len(qualified_songs) < limit and effective_target and effective_target != "mix":
+        try:
+            extra_res = client.table("songs")\
+                .select("*")\
+                .eq("status", "available")\
+                .or_(f"genre.eq.{effective_target},language.ilike.{effective_target}")\
+                .order("play_count", desc=True)\
+                .limit(limit * 3)\
+                .execute()
+            for s in (extra_res.data or []):
+                if can_add_song(s):
+                    sid = str(s.get("id", ""))
+                    canon = get_canonical_title(s.get("title", ""))
+                    seen_ids.add(sid)
+                    if canon:
+                        seen_titles.add(canon)
+                    s["tier"] = 5
+                    qualified_songs.append(s)
+                    if len(qualified_songs) >= limit:
+                        break
+        except Exception as bf_err:
+            print(f"Linguistic backfill notice: {bf_err}")
 
     # ─── ENERGY ARC ARRANGEMENT & ARTIST DIVERSITY ───
     final_queue = apply_energy_arc(qualified_songs, limit=limit)

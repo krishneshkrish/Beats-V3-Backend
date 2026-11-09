@@ -233,7 +233,8 @@ async def radio_recs(
     supabase,
     redis,
     exclude_ids: list = None,
-    now: datetime = None
+    now: datetime = None,
+    target_language: str = None,
 ) -> list:
     """
     Automated Up Next Queue (Authentic YouTube Music Experience).
@@ -268,13 +269,26 @@ async def radio_recs(
             pass
 
     if not seed_song:
-        seed_song = await fetch_saavn_song_on_the_fly(clean_q, supabase)
+        seed_song = await fetch_saavn_song_on_the_fly(clean_q, supabase, preferred_genre=target_language)
 
     if not seed_song:
-        # Fallback to general time-aware recs
+        # Fallback to language-targeted catalog songs instead of cross-lingual rule_based_recs
+        if target_language and target_language != "mix":
+            try:
+                fb_res = supabase.table("songs")\
+                    .select("*")\
+                    .eq("status", "available")\
+                    .or_(f"genre.eq.{target_language},language.ilike.{target_language}")\
+                    .order("play_count", desc=True)\
+                    .limit(limit)\
+                    .execute()
+                if fb_res.data:
+                    return fb_res.data
+            except Exception:
+                pass
         return await rule_based_recs(user_id, limit, supabase, redis, now)
 
-    # 2. Build exact YouTube Music mood-matched Up Next queue with user anti-fatigue filtering
+    # 2. Build exact YouTube Music mood-matched Up Next queue with user anti-fatigue & strict linguistic filtering
     return await build_ytmusic_mood_queue(
         seed_song=seed_song,
         limit=limit,
@@ -282,6 +296,7 @@ async def radio_recs(
         redis=redis,
         exclude_ids=exclude_ids,
         user_id=user_id,
+        target_language=target_language,
     )
 
 
