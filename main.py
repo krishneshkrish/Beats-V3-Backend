@@ -659,41 +659,83 @@ def generate_search_variants(q: str) -> list:
 
 async def fetch_dynamic_search_songs(query: str, client: Client, limit: int = 10) -> List[dict]:
     """
-    On-demand search ingestion: when a user searches for a movie (e.g. 'Ghilli', 'Ghilli tamil',
+    On-demand search ingestion: when a user searches for a song, movie (e.g. 'FA FA FA', 'OM',
     'Aavesham', 'Premam', etc.) or artist that is not yet fully in catalog,
     dynamically fetch the songs from CDN, persist to Supabase, and return them immediately.
     """
     try:
         from urllib.parse import quote
         q_clean = query.strip()
-        url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&n={limit}&p=1&q={quote(q_clean)}"
+        search_queries = [q_clean]
+
+        # If query is short (<= 4 chars like 'om'), also include regional/movie variants
+        if len(q_clean) <= 4:
+            search_queries.extend([f"{q_clean} movie", f"{q_clean} tamil", f"{q_clean} songs"])
+        if " from " in q_clean.lower():
+            t_part, _, _ = q_clean.lower().partition(" from ")
+            if len(t_part.strip()) >= 2:
+                search_queries.append(t_part.strip())
+
+        results = []
+        seen_media_urls = set()
         async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, timeout=6.0) as hclient:
-            r = await hclient.get(url)
-            if r.status_code != 200:
-                return []
-            data = json.loads(r.text.strip())
-            results = data.get("results", [])
+            for sq in search_queries[:3]:
+                url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&n={limit}&p=1&q={quote(sq)}"
+                try:
+                    r = await hclient.get(url)
+                    if r.status_code == 200:
+                        data = json.loads(r.text.strip())
+                        batch = data.get("results", [])
+                        for item in batch:
+                            enc = item.get("encrypted_media_url")
+                            if enc and enc not in seen_media_urls:
+                                seen_media_urls.add(enc)
+                                results.append(item)
+                except Exception:
+                    pass
+                if len(results) >= limit:
+                    break
+
             if not results:
                 return []
             
             records = []
+            seen_stream_urls = set()
+            seen_titles = set()
             for item in results:
                 enc = item.get("encrypted_media_url")
                 if not enc:
                     continue
                 stream_url = decrypt_saavn_url(enc)
-                if not stream_url:
+                if not stream_url or stream_url in seen_stream_urls:
                     continue
+                seen_stream_urls.add(stream_url)
+                
                 raw_title = html.unescape(item.get("song") or item.get("title") or "")
                 title = raw_title.replace("&quot;", '"').replace("&#039;", "'").strip()
                 raw_artist = html.unescape(item.get("singers") or item.get("primary_artists") or "Various")
                 artist = raw_artist.replace("&quot;", '"').replace("&#039;", "'").strip()
                 raw_film = html.unescape(item.get("album") or "")
                 film = raw_film.replace("&quot;", '"').replace("&#039;", "'").strip() or "Single"
+
+                # Extract clean movie/film title if album or title contains (From "...")
+                m_film = re.search(r'(?:from\s+["\']?)([^"\'\)\]]+)', film, re.I)
+                if not m_film:
+                    m_film = re.search(r'(?:from\s+["\']?)([^"\'\)\]]+)', title, re.I)
+                if m_film:
+                    extracted = m_film.group(1).strip()
+                    if len(extracted) >= 2:
+                        film = extracted
+
                 thumb = (item.get("image") or "").replace("150x150", "500x500")
                 raw_lang = (item.get("language") or "").strip().lower()
+                norm_key = (title.lower(), raw_lang)
+                if norm_key in seen_titles:
+                    continue
+                seen_titles.add(norm_key)
+
                 lang = raw_lang.capitalize() if raw_lang else "Tamil"
-                genre = raw_lang if raw_lang in ["tamil", "hindi", "english", "malayalam", "phonk", "telugu"] else "mix"
+                genre = raw_lang if raw_lang in ["tamil", "hindi", "english", "malayalam", "phonk", "telugu", "kannada", "punjabi"] else "mix"
                 dur = int(item.get("duration") or 180)
 
                 feats = infer_song_features(title, artist, genre)
@@ -904,14 +946,17 @@ async def search_songs(
     words = [w for w in clean_q.split() if len(w) >= 2]
     words_no_stop = [w for w in strip_search_stopwords(clean_q).split() if len(w) >= 2]
     effective_words = words_no_stop if words_no_stop else words
+    unique_words = list(dict.fromkeys(effective_words))
+    # Filter out single-repetition short words (<= 2 chars) to avoid flooding with substring noise
+    meaningful_words = [w for w in unique_words if len(w) >= 3] or [w for w in unique_words if len(w) >= 2]
 
-    if len(effective_words) > 1 and len(songs_data) < candidate_limit:
+    if len(effective_words) > 1 and len(meaningful_words) > 1 and len(songs_data) < candidate_limit:
         try:
             query_words = client.table("songs")\
                 .select("id, title, artist, film, genre, language, duration, thumbnail_url, play_count, status")\
                 .eq("status", "available")
 
-            for term in effective_words[:3]:
+            for term in meaningful_words[:3]:
                 term_variants = generate_search_variants(term)
                 term_clauses = []
                 for tv in term_variants[:3]:
@@ -988,18 +1033,41 @@ async def search_songs(
         except Exception as e:
             print(f"Fuzzy matching error: {e}")
 
-    # 6. Dynamic on-the-fly search fetch if local catalog has limited results (< 3) OR lacks normalized title match
+    # 6. Dynamic on-the-fly search fetch if local catalog has limited results (< 3) OR lacks strong title/film match
     norm_search = normalize_search_text(clean_q)
     norm_core = normalize_search_text(core_q)
     q_words = [w for w in norm_core.split() if len(w) >= 2] or [w for w in norm_search.split() if len(w) >= 2]
 
-    has_title_match = any(
-        norm_search in normalize_search_text(s.get("title") or "")
-        or (norm_core and norm_core in normalize_search_text(s.get("title") or ""))
-        or (q_words and all(w in (normalize_search_text(s.get("title") or "") + " " + normalize_search_text(s.get("artist") or "")) for w in q_words))
+    def is_strong_catalog_match(s: dict) -> bool:
+        t = (s.get("title") or "").strip().lower()
+        f = (s.get("film") or "").strip().lower()
+        base_t = re.sub(r'\s*[\(\[].*?[\)\]]', '', t).strip()
+        norm_t = normalize_search_text(t)
+        norm_base_t = normalize_search_text(base_t)
+        norm_f = normalize_search_text(f)
+
+        if norm_base_t == norm_search or norm_t == norm_search:
+            return True
+        if norm_core and (norm_base_t == norm_core or norm_t == norm_core):
+            return True
+        if norm_base_t.startswith(norm_search) or norm_t.startswith(norm_search):
+            return True
+        if norm_f == norm_search or norm_f.startswith(norm_search):
+            return True
+        if bool(re.search(rf"\b{re.escape(norm_search)}\b", norm_t)) or bool(re.search(rf"\b{re.escape(norm_search)}\b", norm_f)):
+            return True
+        if len(q_words) > 1 and all(bool(re.search(rf"\b{re.escape(w)}\b", f"{norm_t} {norm_f}")) for w in q_words):
+            return True
+        return False
+
+    has_title_match = any(is_strong_catalog_match(s) for s in songs_data)
+    has_regional_match = any(
+        (s.get("language") or s.get("genre") or "").strip().lower() in ("tamil", "malayalam", "hindi", "telugu", "kannada", "punjabi")
+        and is_strong_catalog_match(s)
         for s in songs_data
     )
-    if len(songs_data) < 3 or not has_title_match:
+
+    if len(songs_data) < 3 or not has_title_match or not has_regional_match:
         try:
             dynamic_songs = await fetch_dynamic_search_songs(clean_q, client, limit=limit)
             if not dynamic_songs and core_q != clean_q and len(core_q) >= 2:
@@ -1019,6 +1087,12 @@ async def search_songs(
         film = (song.get("film") or "").strip().lower()
         artist = (song.get("artist") or "").strip().lower()
         p_count = song.get("play_count") or 0
+
+        # Base title: stripped of bracketed movie tags / language tags / features
+        # e.g. 'FA FA FA (From "OM Chapter 1: Udhiram - The Blood Wood") [Tamil]' -> 'FA FA FA'
+        base_t = re.sub(r'\s*[\(\[].*?[\)\]]', '', title).strip()
+        clean_base_t = re.sub(r'[,()"\-:]', '', base_t).strip()
+        norm_base_t = normalize_search_text(base_t)
 
         clean_t = re.sub(r'[,()"\-:]', '', title).strip()
         clean_search = re.sub(r'[,()"\-:]', '', clean_q).strip()
@@ -1043,14 +1117,35 @@ async def search_songs(
         has_word_film = bool(re.search(rf"\b{re.escape(clean_q)}\b", film, re.I)) or (norm_core and bool(re.search(rf"\b{re.escape(norm_core)}\b", norm_f, re.I)))
         has_word_artist = bool(re.search(rf"\b{re.escape(clean_q)}\b", artist, re.I)) or (norm_core and bool(re.search(rf"\b{re.escape(norm_core)}\b", norm_a, re.I)))
 
+        # Combined title + film match (e.g. "FA FA FA Om", "Illuminati Aavesham")
+        has_title_and_film = (
+            (base_t and (base_t in clean_q or norm_base_t in norm_search))
+            and (film and (film in clean_q or norm_f in norm_search or any(w in norm_f for w in q_words if w not in norm_base_t)))
+        )
+
+        is_exact_base = (
+            base_t == clean_q
+            or clean_base_t == clean_search
+            or norm_base_t == norm_search
+            or (norm_core and norm_base_t == norm_core)
+        )
+        is_exact_full = (
+            title == clean_q
+            or clean_t == clean_search
+            or norm_t == norm_search
+            or (norm_core and norm_t == norm_core)
+        )
+
         score = 0
-        if has_title_part and has_artist_part and len(q_words) > len(t_words):
-            score = 1150
-        elif title == clean_q or clean_t == clean_search or norm_t == norm_search or (norm_core and norm_t == norm_core):
+        if has_title_and_film and len(q_words) >= 2:
+            score = 1250
+        elif has_title_part and has_artist_part and len(q_words) > len(t_words):
+            score = 1220
+        elif is_exact_base or is_exact_full:
+            score = 1200
+        elif title.startswith(clean_q) or clean_t.startswith(clean_search) or norm_t.startswith(norm_search) or norm_base_t.startswith(norm_search) or (norm_core and (norm_t.startswith(norm_core) or norm_base_t.startswith(norm_core))):
             score = 1000
-        elif title.startswith(clean_q) or clean_t.startswith(clean_search) or norm_t.startswith(norm_search) or (norm_core and norm_t.startswith(norm_core)):
-            score = 950
-        elif (clean_q in title or clean_search in clean_t or norm_search in norm_t or (norm_core and norm_core in norm_t)) and (not is_short_query or has_word_title):
+        elif (clean_q in title or clean_search in clean_t or norm_search in norm_t or norm_search in norm_base_t or (norm_core and norm_core in norm_t)) and (not is_short_query or has_word_title):
             score = 900
         elif q_words and all(w in norm_t for w in q_words) and (not is_short_query or has_word_title):
             score = 850
@@ -1073,21 +1168,40 @@ async def search_songs(
                 matched = sum(1 for w in q_words if w in norm_t or w in norm_f or w in norm_a) if q_words else 0
                 score = 100 + int((matched / max(len(q_words), 1)) * 300)
 
+        # Indian Regional language priority (Beats primary audience)
+        song_lang = (song.get("language") or song.get("genre") or "").strip().lower()
+        is_regional = song_lang in ("tamil", "malayalam", "hindi", "telugu", "kannada", "punjabi")
+        if is_regional:
+            score += 150
+
+        # Official soundtrack / movie release bonus
+        is_soundtrack = (
+            bool(re.search(r'\b(from|ost|chapter|movie|soundtrack)\b', title, re.I))
+            or bool(re.search(r'\b(from|ost|chapter|movie|soundtrack)\b', film, re.I))
+            or (film and film.lower() not in ("single", "unknown", "") and film.lower() != title.lower() and film.lower() != base_t.lower())
+        )
+        if is_soundtrack:
+            score += 100
+
         # Heavily penalize remixes / piano / techno / slowed / sped up / nightcore / covers if user did NOT ask for them
         if song_has_modifier and not query_has_modifier:
             score -= 400
-
-        # Exact clean title bonus: clean titles without brackets, parentheses, or modifiers get priority
-        has_bracket_tags = bool(re.search(r'[\(\[\{]', title))
-        if not has_bracket_tags and not song_has_modifier:
-            score += 50
 
         return (score, p_count)
 
     songs_data.sort(key=compute_relevance, reverse=True)
 
+    deduped_songs = []
+    seen_keys = set()
+    for s in songs_data:
+        t_key = ((s.get("title") or "").strip().lower(), (s.get("language") or "").strip().lower())
+        if t_key in seen_keys:
+            continue
+        seen_keys.add(t_key)
+        deduped_songs.append(s)
+
     from saavn_resolver import normalize_language, detect_song_language
-    for s in songs_data[:limit]:
+    for s in deduped_songs[:limit]:
         raw_l = normalize_language(s.get("language"))
         if not raw_l or raw_l in ("mix", "unknown"):
             det = detect_song_language(s)
@@ -1096,13 +1210,13 @@ async def search_songs(
             s["language"] = raw_l.capitalize()
 
     result = {
-        "songs": songs_data[:limit],
-        "count": len(songs_data[:limit]),
+        "songs": deduped_songs[:limit],
+        "count": len(deduped_songs[:limit]),
     }
 
     # Increment search count for top matching songs
-    if songs_data:
-        top_match = songs_data[0]
+    if deduped_songs:
+        top_match = deduped_songs[0]
         top_id = top_match.get("id")
         if is_valid_uuid(top_id):
             try:
