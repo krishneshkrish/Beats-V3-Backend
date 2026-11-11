@@ -70,6 +70,13 @@ create index if not exists idx_songs_genre on songs(genre);
 create index if not exists idx_songs_status on songs(status);
 create index if not exists idx_songs_play_count on songs(play_count desc);
 create unique index if not exists idx_songs_source_url on songs(source_url);
+
+-- Trigram indexes for ultra-fast ILIKE substring queries across Indian transliterated titles & film names
+create extension if not exists pg_trgm;
+create index if not exists idx_songs_title_trgm on songs using gin (title gin_trgm_ops);
+create index if not exists idx_songs_film_trgm on songs using gin (film gin_trgm_ops);
+create index if not exists idx_songs_artist_trgm on songs using gin (artist gin_trgm_ops);
+
 create index if not exists idx_songs_search on songs using gin(
   to_tsvector('english',
     coalesce(title,'') || ' ' ||
